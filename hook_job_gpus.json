@@ -1,0 +1,12 @@
+{
+    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
+    "jobs_subdir": "pbs_jobs",
+    "state_subdir": "gpu_v2",
+    "nvidia_smi": "/usr/bin/nvidia-smi",
+    "dcgmi": "/usr/bin/dcgmi",
+    "device_isolation": true,
+    "manage_drm_acl": true,
+    "enable_dcgm": true,
+    "periodic_dcgm_update": true,
+    "allocation": "index"
+}

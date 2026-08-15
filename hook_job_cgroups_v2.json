@@ -1,0 +1,11 @@
+{
+    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
+    "jobs_subdir": "pbs_jobs",
+    "state_subdir": "cgroup_v2",
+    "placement": "packed",
+    "memory_default": "400MB",
+    "publish_vmem": true,
+    "periodic_usage_update": true,
+    "kill_timeout": 10,
+    "cpu_weight": 100
+}
