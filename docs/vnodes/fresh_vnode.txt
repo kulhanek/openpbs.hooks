@@ -1,0 +1,21 @@
+[kulhanek@wolf ~]$ pbsnodes -a
+wolf
+     Mom = wolf.ncbr.muni.cz
+     ntype = PBS
+     state = free
+     pcpus = 32
+     resources_available.arch = linux
+     resources_available.host = wolf
+     resources_available.mem = 131885268kb
+     resources_available.ncpus = 32
+     resources_available.vnode = wolf
+     resources_assigned.accelerator_memory = 0kb
+     resources_assigned.hbmem = 0kb
+     resources_assigned.mem = 0kb
+     resources_assigned.naccelerators = 0
+     resources_assigned.ncpus = 0
+     resources_assigned.vmem = 0kb
+     resv_enable = True
+     sharing = default_shared
+     license = l
+     last_state_change_time = Sun Aug 16 10:11:56 2026

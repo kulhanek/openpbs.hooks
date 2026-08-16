@@ -1,5 +1,34 @@
 {
-    "memory_reserve": "0B",
-    "memory_reserve_percent": 0,
-    "publish_vmem": true
+    "distros": [
+        {
+            "name": "**14 (forky)",
+            "os": "debian14",
+            "osfamily": "debian"
+        },
+        {
+            "name": "*Ubuntu 26.04*",
+            "os": "ubuntu26",
+            "osfamily": "ubuntu"
+        },
+        {
+            "name": "**13 (trixie)",
+            "os": "debian13",
+            "osfamily": "debian"
+        },
+        {
+            "name": "*Ubuntu 24.04*",
+            "os": "ubuntu24",
+            "osfamily": "ubuntu"
+        },
+        {
+            "name": "**12 (bookworm)",
+            "os": "debian12",
+            "osfamily": "debian"
+        },
+        {
+            "name": "*Ubuntu 22.04*",
+            "os": "ubuntu22",
+            "osfamily": "ubuntu"
+        }
+    ]
 }

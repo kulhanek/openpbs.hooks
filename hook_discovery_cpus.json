@@ -1,0 +1,23 @@
+{
+    "memory_reserve": "4GB",
+    "publish_vmem": true,
+    "cpu_vendor_map": [
+        {
+            "pattern": "*AMD*",
+            "cs": false,
+            "alias": "amd"
+        },
+        {
+            "pattern": "*Intel*",
+            "cs": false,
+            "alias": "intel"
+        }
+    ],
+    "default_spec": 30.0,
+    "cpu_spec_map": [
+        {
+            "pattern": "*AMD EPYC 7402P*",
+            "value": 40.1
+        }
+    ]
+}

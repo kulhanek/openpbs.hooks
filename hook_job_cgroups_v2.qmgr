@@ -1,0 +1,28 @@
+
+#
+# ---------------------------------------------------------------------------
+# Per-job cgroup v2 CPU/memory management
+# ---------------------------------------------------------------------------
+#
+create hook job_cgroups_v2
+set hook job_cgroups_v2 type = site
+set hook job_cgroups_v2 enabled = true
+set hook job_cgroups_v2 event = exechost_startup
+set hook job_cgroups_v2 event += exechost_periodic
+set hook job_cgroups_v2 event += execjob_begin
+set hook job_cgroups_v2 event += execjob_launch
+set hook job_cgroups_v2 event += execjob_attach
+set hook job_cgroups_v2 event += execjob_epilogue
+set hook job_cgroups_v2 event += execjob_end
+set hook job_cgroups_v2 event += execjob_abort
+set hook job_cgroups_v2 event += execjob_resize
+set hook job_cgroups_v2 user = pbsadmin
+set hook job_cgroups_v2 alarm = 30
+set hook job_cgroups_v2 freq = 120
+set hook job_cgroups_v2 order = 10
+set hook job_cgroups_v2 debug = false
+set hook job_cgroups_v2 fail_action = none
+
+import hook job_cgroups_v2 application/x-python default /root/openpbs.hooks/hook_job_cgroups_v2.py
+import hook job_cgroups_v2 application/x-config default /root/openpbs.hooks/hook_job_cgroups_v2.json
+

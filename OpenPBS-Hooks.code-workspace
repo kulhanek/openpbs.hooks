@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+    "settings": {
+        "files.exclude": {
+            "**/*.o": true,
+            "**/*.mod": true,
+            "**/build": true,
+			"**/*.cmake": true,
+			"bin": true,
+			"obj": true,
+			"lib": true,
+			"Testing": true,
+			"tests": true,
+			"**/CMakeFiles": true,
+			"**/Makefile": true,
+			"CMakeCache.txt": true,
+			"DartConfiguration.tcl": true
+		},
+		"editor.fontSize": 16,
+	}
+}

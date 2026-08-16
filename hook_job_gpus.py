@@ -1,7 +1,7 @@
 # coding: utf-8
 """
 OpenPBS job hook: whole NVIDIA GPU allocation, cgroup-v2 device
-isolation, CUDA environment setup, and DCGM accounting.
+isolation, CUDA environment setup, and lightweight nvidia-smi accounting.
 
 Scope
 -----
@@ -9,11 +9,12 @@ Scope
 * GPU allocation is immutable for the lifetime of a job.
 * CPU/memory/cgroup creation is owned by hook_job_cgroups_v2.py.
 * This hook attaches a BPF_CGROUP_DEVICE policy to that existing job cgroup.
-* DCGM failures are accounting failures and are non-fatal.  GPU allocation or
+* GPU telemetry uses only nvidia-smi and is non-fatal.  GPU allocation or
   device-isolation failures are fatal and reject the job.
+* This hook does not publish vnode/resources_available GPU discovery data.
 
-PBS resources expected for DCGM accounting
-------------------------------------------
+PBS resources expected for accounting
+-------------------------------------
     create resource gpupercent
     set resource gpupercent type = long
     set resource gpupercent flag = r
@@ -21,10 +22,6 @@ PBS resources expected for DCGM accounting
     create resource gpumemmaxpercent
     set resource gpumemmaxpercent type = long
     set resource gpumemmaxpercent flag = r
-
-    create resource gpupowerusage
-    set resource gpupowerusage type = float
-    set resource gpupowerusage flag = r
 
 Events to enable
 ----------------
@@ -36,13 +33,11 @@ cgroup must already exist before the BPF device program is attached.
 """
 
 import ctypes
-import errno
 import fcntl
 import glob
 import json
 import os
 import platform
-import re
 import stat
 import subprocess
 import time
@@ -56,11 +51,9 @@ DEFAULT_CONFIG = {
     "jobs_subdir": "pbs_jobs",
     "state_subdir": "gpu_v2",
     "nvidia_smi": "/usr/bin/nvidia-smi",
-    "dcgmi": "/usr/bin/dcgmi",
     "device_isolation": True,
     "manage_drm_acl": True,
-    "enable_dcgm": True,
-    "periodic_dcgm_update": True,
+    "telemetry": True,
     "allocation": "index",          # index | numa
 }
 
@@ -135,10 +128,14 @@ def local_ngpus(job):
         if not vnode_is_local(chunk.vnode_name):
             continue
         try:
-            if "ngpus" in chunk.chunk_resources:
-                total += int(chunk.chunk_resources["ngpus"])
+            value = chunk.chunk_resources["ngpus"]
         except Exception:
-            pass
+            value = None
+        if value is not None:
+            try:
+                total += int(value)
+            except (TypeError, ValueError):
+                pass
     return total
 
 
@@ -188,10 +185,10 @@ class FileLock(object):
 
 
 # ---------------------------------------------------------------------------
-# NVIDIA GPU discovery
+# NVIDIA runtime inventory
 # ---------------------------------------------------------------------------
 
-class NvidiaDiscovery(object):
+class NvidiaRuntime(object):
     def __init__(self, cfg):
         self.cfg = cfg
 
@@ -218,7 +215,7 @@ class NvidiaDiscovery(object):
                     result.append(info)
         return result
 
-    def discover(self):
+    def inventory(self):
         if not self.available():
             return []
         cmd = [self.cfg["nvidia_smi"],
@@ -255,6 +252,33 @@ class NvidiaDiscovery(object):
             })
         gpus.sort(key=lambda g: g["index"])
         return gpus
+
+    def telemetry(self):
+        """Return UUID -> instantaneous utilization and memory usage."""
+        if not self.available():
+            return {}
+        cmd = [self.cfg["nvidia_smi"],
+               "--query-gpu=uuid,utilization.gpu,memory.used,memory.total",
+               "--format=csv,noheader,nounits"]
+        rc, out, err = run(cmd)
+        if rc != 0:
+            raise RuntimeError("nvidia-smi telemetry failed: %s" % err.strip())
+
+        values = {}
+        for raw in out.splitlines():
+            parts = [x.strip() for x in raw.split(",")]
+            if len(parts) != 4:
+                continue
+            try:
+                values[parts[0]] = {
+                    "util": float(parts[1]),
+                    "mem_used": float(parts[2]),
+                    "mem_total": float(parts[3]),
+                }
+            except (TypeError, ValueError):
+                # Some drivers report N/A for unsupported telemetry fields.
+                continue
+        return values
 
 
 # ---------------------------------------------------------------------------
@@ -466,124 +490,17 @@ def setfacl(path, user, add=True):
 
 
 # ---------------------------------------------------------------------------
-# DCGM accounting
+# nvidia-smi telemetry and hook orchestration
 # ---------------------------------------------------------------------------
 
-class DcgmAccounting(object):
-    GROUP_RE = re.compile(r"group ID of ([0-9]+)\s*$")
+def set_resource_used(job, name, value):
+    """Set a resources_used value without iterating over pbs_resource."""
+    try:
+        job.resources_used[name] = value
+    except Exception as exc:
+        log(pbs.EVENT_ERROR, "cannot set resources_used.%s for %s: %s" %
+            (name, job.id, exc))
 
-    def __init__(self, cfg):
-        self.cfg = cfg
-
-    def available(self):
-        return (self.cfg.get("enable_dcgm", True)
-                and os.path.isfile(self.cfg["dcgmi"]))
-
-    def _dcgm_ids(self):
-        """Return UUID -> DCGM GPU entity ID from `dcgmi discovery -l`."""
-        rc, out, err = run([self.cfg["dcgmi"], "discovery", "-l"])
-        if rc != 0:
-            raise RuntimeError("dcgmi discovery failed: %s" % err.strip())
-        result = {}
-        current_id = None
-        for line in out.splitlines():
-            cols = line.split("|")
-            if len(cols) != 4:
-                continue
-            left = cols[1].strip()
-            field = cols[2].strip()
-            if field.startswith("Name:"):
-                try:
-                    current_id = int(left)
-                except Exception:
-                    current_id = None
-            elif field.startswith("Device UUID:") and current_id is not None:
-                result[field.split(":", 1)[1].strip()] = current_id
-        return result
-
-    def start(self, jobid, gpus):
-        if not self.available() or not gpus:
-            return None
-        name = "pbs_" + re.sub(r"[^A-Za-z0-9_.-]", "_", str(jobid))
-        rc, out, err = run([self.cfg["dcgmi"], "group", "-c", name])
-        if rc != 0:
-            raise RuntimeError("cannot create DCGM group: %s" % err.strip())
-        groupid = None
-        for line in out.splitlines():
-            m = self.GROUP_RE.search(line)
-            if m:
-                groupid = int(m.group(1))
-                break
-        if groupid is None:
-            raise RuntimeError("cannot parse DCGM group ID from: %s" % out.strip())
-
-        try:
-            mapping = self._dcgm_ids()
-            for gpu in gpus:
-                if gpu["uuid"] not in mapping:
-                    raise RuntimeError("GPU UUID %s absent from DCGM discovery" % gpu["uuid"])
-                run([self.cfg["dcgmi"], "group", "-g", str(groupid),
-                     "-a", str(mapping[gpu["uuid"]])], check=True)
-                gpu["dcgm_id"] = mapping[gpu["uuid"]]
-            # Enabling stats is global/idempotent in DCGM.
-            run([self.cfg["dcgmi"], "stats", "-e"])
-            run([self.cfg["dcgmi"], "stats", "-g", str(groupid),
-                 "-s", str(jobid)], check=True)
-        except Exception:
-            run([self.cfg["dcgmi"], "group", "-d", str(groupid)])
-            raise
-        return groupid
-
-    def collect(self, job, state):
-        if not self.available() or state.get("dcgm_group_id") is None:
-            return
-        rc, out, err = run([self.cfg["dcgmi"], "stats", "-j", str(job.id), "-v"])
-        if rc != 0:
-            raise RuntimeError("dcgmi stats failed: %s" % err.strip())
-
-        gpupercent = 0
-        total_max_mem = 0
-        total_power_avg = 0.0
-        for line in out.splitlines():
-            cols = line.split("|")
-            if len(cols) != 4:
-                continue
-            name = cols[1].strip()
-            value = cols[2].strip()
-            if name.startswith("SM Utilization"):
-                m = re.search(r"Avg:\s*([0-9]+(?:\.[0-9]+)?)", value)
-                if m:
-                    gpupercent += int(round(float(m.group(1))))
-            elif name.startswith("Max GPU Memory Used"):
-                m = re.search(r"([0-9]+)", value)
-                if m:
-                    total_max_mem += int(m.group(1))
-            elif name.startswith("Power Usage"):
-                m = re.search(r"Avg:\s*([0-9]+(?:\.[0-9]+)?)", value)
-                if m:
-                    total_power_avg += float(m.group(1))
-
-        total_mem = sum(int(g.get("memory", 0)) for g in state.get("gpus", []))
-        mem_pct = int(round(100.0 * total_max_mem / total_mem)) if total_mem > 0 else 0
-        elapsed_h = max(0.0, time.time() - float(state.get("dcgm_started_at", time.time()))) / 3600.0
-        energy_wh = total_power_avg * elapsed_h
-
-        job.resources_used["gpupercent"] = gpupercent
-        job.resources_used["gpumemmaxpercent"] = mem_pct
-        job.resources_used["gpupowerusage"] = energy_wh
-
-    def stop(self, jobid, state):
-        if not self.available() or state.get("dcgm_group_id") is None:
-            return
-        groupid = int(state["dcgm_group_id"])
-        run([self.cfg["dcgmi"], "stats", "-x", str(jobid)])
-        run([self.cfg["dcgmi"], "stats", "-r", str(jobid)])
-        run([self.cfg["dcgmi"], "group", "-d", str(groupid)])
-
-
-# ---------------------------------------------------------------------------
-# Hook orchestration
-# ---------------------------------------------------------------------------
 
 class GpuHook(object):
     def __init__(self):
@@ -591,8 +508,7 @@ class GpuHook(object):
         conf = read_pbs_conf()
         pbs_home = conf.get("PBS_MOM_HOME", conf.get("PBS_HOME", "/var/spool/pbs"))
         self.state = GpuState(self.cfg, pbs_home)
-        self.discovery = NvidiaDiscovery(self.cfg)
-        self.dcgm = DcgmAccounting(self.cfg)
+        self.nvidia = NvidiaRuntime(self.cfg)
         self.jobs_root = os.path.join(os.path.realpath(self.cfg["cgroup_root"]),
                                       self.cfg["jobs_subdir"])
 
@@ -645,19 +561,59 @@ class GpuHook(object):
                 try:
                     setfacl(dev["path"], user, add=False)
                 except Exception as exc:
-                    log(pbs.EVENT_DEBUG, "DRM ACL cleanup failed for %s: %s" % (dev["path"], exc))
+                    log(pbs.EVENT_DEBUG, "DRM ACL cleanup failed for %s: %s" %
+                        (dev["path"], exc))
+
+    def _update_telemetry(self, job, state, sample):
+        """
+        Update accounting from one node-wide nvidia-smi sample.
+
+        gpupercent is the running arithmetic mean of the sum of GPU utilization
+        percentages across GPUs allocated to this local job.  Consequently its
+        range is 0..100*N for N GPUs.
+
+        gpumemmaxpercent is the maximum observed aggregate memory fraction:
+        100 * sum(memory.used) / sum(memory.total), range 0..100.
+        """
+        uuids = [g.get("uuid") for g in state.get("gpus", []) if g.get("uuid")]
+        if not uuids:
+            return False
+
+        rows = [sample[u] for u in uuids if u in sample]
+        if len(rows) != len(uuids):
+            missing = [u for u in uuids if u not in sample]
+            log(pbs.EVENT_DEBUG, "telemetry missing GPUs for %s: %s" %
+                (job.id, missing))
+            return False
+
+        util_sum = sum(float(row["util"]) for row in rows)
+        mem_used = sum(float(row["mem_used"]) for row in rows)
+        mem_total = sum(float(row["mem_total"]) for row in rows)
+        mem_pct = 100.0 * mem_used / mem_total if mem_total > 0.0 else 0.0
+
+        state["gpu_util_sum"] = float(state.get("gpu_util_sum", 0.0)) + util_sum
+        state["gpu_samples"] = int(state.get("gpu_samples", 0)) + 1
+        state["gpu_mem_peak_pct"] = max(float(state.get("gpu_mem_peak_pct", 0.0)),
+                                         mem_pct)
+        state["telemetry_updated"] = time.time()
+
+        gpupercent = int(round(state["gpu_util_sum"] / state["gpu_samples"]))
+        gpumemmaxpercent = int(round(state["gpu_mem_peak_pct"]))
+        set_resource_used(job, "gpupercent", gpupercent)
+        set_resource_used(job, "gpumemmaxpercent", gpumemmaxpercent)
+        return True
 
     def begin(self, e):
         job = e.job
         count = local_ngpus(job)
-        all_gpus = self.discovery.discover() if self.discovery.available() else []
+        all_gpus = self.nvidia.inventory() if self.nvidia.available() else []
         if count > 0 and not all_gpus:
             e.reject("pbs_job_gpus: job requests GPUs but no NVIDIA GPUs are available")
             return False
 
         cgroup_path = self.cgroup_path(job.id)
         if not os.path.isdir(cgroup_path):
-            e.reject("pbs_job_gpus: job cgroup does not exist; ensure hook_job_cgroups_v2 runs before hook_job_gpus")
+            e.reject("pbs_job_gpus: job cgroup does not exist; ensure job_cgroups_v2 runs before job_gpus")
             return False
 
         with FileLock(self.state.lock_file):
@@ -675,21 +631,16 @@ class GpuHook(object):
                 "created": time.time(),
                 "euser": str(job.euser),
                 "gpus": selected,
-                "dcgm_group_id": None,
-                "dcgm_started_at": None,
+                "gpu_util_sum": 0.0,
+                "gpu_samples": 0,
+                "gpu_mem_peak_pct": 0.0,
+                "telemetry_updated": None,
             }
-
-            # Accounting failure must not fail the job.
-            if selected and self.dcgm.available():
-                try:
-                    groupid = self.dcgm.start(job.id, selected)
-                    state["dcgm_group_id"] = groupid
-                    state["dcgm_started_at"] = time.time()
-                except Exception as exc:
-                    log(pbs.EVENT_ERROR, "DCGM startup failed for %s: %s" % (job.id, exc))
-
             self.state.save(job.id, state)
 
+        if selected:
+            set_resource_used(job, "gpupercent", 0)
+            set_resource_used(job, "gpumemmaxpercent", 0)
         log(pbs.EVENT_DEBUG, "job %s allocated GPUs: %s" %
             (job.id, [g["uuid"] for g in selected]))
         return True
@@ -704,34 +655,39 @@ class GpuHook(object):
         if uuids:
             e.env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
-    def _collect_nonfatal(self, job, state):
-        if state is None:
-            return
-        try:
-            self.dcgm.collect(job, state)
-        except Exception as exc:
-            log(pbs.EVENT_ERROR, "DCGM collection failed for %s: %s" % (job.id, exc))
-
     def periodic(self, e):
-        live = set(str(x) for x in e.job_list.keys())
+        # e.job_list is a PBS job dictionary.  No pbs_resource object is ever
+        # iterated here; resource access elsewhere is by direct key lookup.
+        live = set(str(jobid) for jobid in e.job_list.keys())
         states = self.state.all()
-        if self.cfg.get("periodic_dcgm_update", True):
-            for jobid, job in e.job_list.items():
-                state = states.get(str(jobid))
-                if state:
-                    self._collect_nonfatal(job, state)
 
-        # Clean stale GPU/DCGM state.  Device BPF state is tied to the cgroup
-        # and disappears when the CPU hook deletes the cgroup.
+        sample = {}
+        if self.cfg.get("telemetry", True) and self.nvidia.available():
+            try:
+                sample = self.nvidia.telemetry()
+            except Exception as exc:
+                log(pbs.EVENT_ERROR, "nvidia-smi telemetry failed: %s" % exc)
+
+        if sample:
+            for jobid in e.job_list.keys():
+                state = states.get(str(jobid))
+                if not state or not state.get("gpus"):
+                    continue
+                try:
+                    job = e.job_list[jobid]
+                    if self._update_telemetry(job, state, sample):
+                        self.state.save(jobid, state)
+                except Exception as exc:
+                    log(pbs.EVENT_ERROR, "GPU telemetry update failed for %s: %s" %
+                        (jobid, exc))
+
+        # Clean stale allocation state.  The BPF program is bound to the job
+        # cgroup and disappears when the cgroup hook removes that cgroup.
         for jobid, state in states.items():
             if jobid in live:
                 continue
             if time.time() - float(state.get("created", 0)) < 30:
                 continue
-            try:
-                self.dcgm.stop(jobid, state)
-            except Exception as exc:
-                log(pbs.EVENT_ERROR, "DCGM orphan cleanup failed for %s: %s" % (jobid, exc))
             self._remove_drm_acls(state.get("euser", ""), state)
             self.state.delete(jobid)
 
@@ -739,26 +695,18 @@ class GpuHook(object):
         state = self.state.load(e.job.id)
         if state is None:
             return
-        self._collect_nonfatal(e.job, state)
-        try:
-            self.dcgm.stop(e.job.id, state)
-        except Exception as exc:
-            log(pbs.EVENT_ERROR, "DCGM stop failed for %s: %s" % (e.job.id, exc))
-        state["dcgm_group_id"] = None
-        self.state.save(e.job.id, state)
+        # Do not take a final post-process nvidia-smi sample: by epilogue time
+        # the GPU workload has normally exited, which would bias gpupercent low.
+        samples = int(state.get("gpu_samples", 0))
+        if state.get("gpus") and samples == 0:
+            log(pbs.EVENT_DEBUG, "job %s ended before any periodic GPU telemetry sample" %
+                e.job.id)
         self._remove_drm_acls(e.job.euser, state)
 
     def end(self, e):
         state = self.state.load(e.job.id)
         if state is None:
             return
-        # Defensive cleanup for paths where epilogue did not run.
-        if state.get("dcgm_group_id") is not None:
-            try:
-                self._collect_nonfatal(e.job, state)
-                self.dcgm.stop(e.job.id, state)
-            except Exception as exc:
-                log(pbs.EVENT_ERROR, "DCGM final cleanup failed for %s: %s" % (e.job.id, exc))
         self._remove_drm_acls(state.get("euser", str(e.job.euser)), state)
         self.state.delete(e.job.id)
 
@@ -796,8 +744,8 @@ except SystemExit:
     raise
 except Exception as exc:
     log(pbs.EVENT_ERROR, "%s\n%s" % (exc, traceback.format_exc()))
-    # GPU allocation/isolation failures are fatal.  DCGM paths catch their own
-    # exceptions before they reach this level.
+    # GPU allocation/isolation failures are fatal. Telemetry failures are caught
+    # inside the periodic path and never reach this level.
     try:
         pbs.event().reject("pbs_job_gpus failed: %s" % exc)
     except Exception:

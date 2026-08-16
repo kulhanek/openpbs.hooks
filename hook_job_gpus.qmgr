@@ -1,0 +1,36 @@
+#
+# ---------------------------------------------------------------------------
+# Per-job NVIDIA GPU allocation/isolation and nvidia-smi accounting
+# ---------------------------------------------------------------------------
+#
+# job_cgroups_v2 uses order 10.  Hooks run in ascending order, so order 20
+# makes job_gpus run after the cgroup hook; execjob_begin can therefore attach
+# its BPF_CGROUP_DEVICE program to the already-created job cgroup.
+#
+create resource gpupercent
+set resource gpupercent type = long
+set resource gpupercent flag = r
+
+create resource gpumemmaxpercent
+set resource gpumemmaxpercent type = long
+set resource gpumemmaxpercent flag = r
+
+create hook job_gpus
+set hook job_gpus type = site
+set hook job_gpus enabled = true
+set hook job_gpus event = exechost_periodic
+set hook job_gpus event += execjob_begin
+set hook job_gpus event += execjob_launch
+set hook job_gpus event += execjob_epilogue
+set hook job_gpus event += execjob_end
+set hook job_gpus event += execjob_abort
+set hook job_gpus event += execjob_resize
+set hook job_gpus user = pbsadmin
+set hook job_gpus alarm = 30
+set hook job_gpus freq = 30
+set hook job_gpus order = 20
+set hook job_gpus debug = false
+set hook job_gpus fail_action = none
+
+import hook job_gpus application/x-python default /root/openpbs.hooks/hook_job_gpus.py
+import hook job_gpus application/x-config default /root/openpbs.hooks/hook_job_gpus.json

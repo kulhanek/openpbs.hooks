@@ -1,0 +1,46 @@
+
+# workspace storage ----------------------
+create resource scratch_local
+set resource scratch_local type = size
+set resource scratch_local flag = hn
+
+create resource scratch_shared
+set resource scratch_shared type = size
+set resource scratch_shared flag = hn
+
+create resource scratch_nvme
+set resource scratch_nvme type = size
+set resource scratch_nvme flag = hn
+
+create resource scratch_ssd
+set resource scratch_ssd type = size
+set resource scratch_ssd flag = hn
+
+create resource scratch_hdd
+set resource scratch_hdd type = size
+set resource scratch_hdd flag = hn
+
+create resource scratch_shm
+set resource scratch_shm type = boolean
+set resource scratch_shm flag = h
+
+#
+# Create and define hook workspace
+#
+create hook workspace
+set hook workspace type = site
+set hook workspace enabled = true
+set hook workspace event = execjob_begin
+set hook workspace event += execjob_end
+set hook workspace event += exechost_periodic
+set hook workspace event += queuejob
+set hook workspace user = pbsadmin
+set hook workspace alarm = 60
+set hook workspace freq = 180
+set hook workspace order = 10
+set hook workspace debug = false
+set hook workspace fail_action = none
+import hook workspace application/x-python default /root/openpbs.hooks/hook_workspace.py
+import hook workspace application/x-config default /root/openpbs.hooks/hook_workspace.json
+
+

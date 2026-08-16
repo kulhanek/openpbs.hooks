@@ -208,6 +208,31 @@ def resource_truth(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on", "enabled")
 
 
+def resource_string_array(value):
+    """Return a PBS string_array-like value as a list of strings."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(x).strip() for x in value if str(x).strip()]
+
+    # Some PBS string_array objects are iterable, while others are best
+    # represented by their comma-separated string form.  Support both.
+    if not isinstance(value, str):
+        try:
+            items = [str(x).strip() for x in value]
+            if items:
+                return [x for x in items if x]
+        except Exception:
+            pass
+
+    text = str(value).strip()
+    if not text:
+        return []
+    text = text.strip("[]{}()")
+    return [x.strip().strip("\"'") for x in re.split(r"[,\s]+", text)
+            if x.strip().strip("\"'")]
+
+
 def local_node_names():
     names = set()
     for value in (pbs.get_local_nodename(), os.uname().nodename):
@@ -229,36 +254,129 @@ def vnode_is_local(name):
     return base in names or short in names
 
 
-def local_job_resources(job):
-    """Return resources assigned by exec_vnode to this MoM."""
-    result = {}
+def validate_local_vnode_cgroups(job):
+    """Require every local vnode allocated to the job to advertise cgroups=v2."""
+    vnode_names = []
     try:
         chunks = job.exec_vnode.chunks
     except Exception:
         chunks = []
+
+    for chunk in chunks:
+        name = str(chunk.vnode_name)
+        if vnode_is_local(name) and name not in vnode_names:
+            vnode_names.append(name)
+
+    if not vnode_names:
+        raise RuntimeError("cannot determine local vnode from exec_vnode")
+
+    server = pbs.server()
+    for name in vnode_names:
+        try:
+            vnode = server.vnode(name)
+            if vnode is None:
+                raise RuntimeError("vnode not found")
+            value = vnode.resources_available["cgroups"]
+            cgroups = resource_string_array(value)
+        except Exception as exc:
+            raise RuntimeError(
+                "cannot read resources_available.cgroups for vnode %s: %s" %
+                (name, exc)
+            )
+
+        if "v2" not in [x.lower() for x in cgroups]:
+            raise RuntimeError(
+                "vnode %s does not support cgroup v2: "
+                "resources_available.cgroups=%r" % (name, cgroups)
+            )
+
+
+def requested_hyperthreading(job):
+    """
+    Return the job-wide hyperthreading request from schedselect.
+
+    If hyperthreading is specified in multiple chunks, all explicit values
+    must agree.  Contradictory requests are rejected.
+    """
+
+    try:
+        select = job.schedselect
+        if select is None:
+            return False
+
+        select = str(select)
+
+    except Exception as exc:
+        log(pbs.EVENT_DEBUG,
+            "job %s: cannot read schedselect: %s" %
+            (job.id, exc))
+        return False
+
+    values = set()
+
+    for chunk in select.split("+"):
+        chunk_value = None
+
+        for part in chunk.split(":"):
+            if "=" not in part:
+                continue
+
+            key, value = part.split("=", 1)
+
+            if key.strip().lower() == "hyperthreading":
+                chunk_value = resource_truth(value)
+                break
+
+        if chunk_value is not None:
+            values.add(chunk_value)
+
+    if len(values) > 1:
+        raise RuntimeError(
+            "contradictory hyperthreading requests in schedselect: %s" %
+            select
+        )
+
+    return True in values
+
+def local_job_resources(job):
+    """Return resources assigned by exec_vnode and select to this MoM."""
+    result = {}
+
+    try:
+        chunks = job.exec_vnode.chunks
+    except Exception:
+        chunks = []
+
     for chunk in chunks:
         if not vnode_is_local(chunk.vnode_name):
             continue
-        for key, value in chunk.chunk_resources.items():
-            key = str(key)
-            if key in ("ncpus", "ngpus"):
-                result[key] = int(result.get(key, 0)) + int(value)
-            elif key in ("mem", "vmem", "hpmem"):
-                result[key] = int(result.get(key, 0)) + size_to_bytes(value)
-            elif key == "hyperthreading":
-                result[key] = resource_truth(value)
-            else:
-                # Preserve scalar custom values when needed later.
-                result[key] = value
-    # A host-level resource can sometimes be visible only in Resource_List.
-    if "hyperthreading" not in result:
+
+        r = chunk.chunk_resources
+
         try:
-            if "hyperthreading" in job.Resource_List:
-                result["hyperthreading"] = resource_truth(job.Resource_List["hyperthreading"])
+            value = r["ncpus"]
+            if value is not None:
+                result["ncpus"] = int(result.get("ncpus", 0)) + int(value)
         except Exception:
             pass
-    return result
 
+        try:
+            value = r["mem"]
+            if value is not None:
+                result["mem"] = int(result.get("mem", 0)) + size_to_bytes(value)
+        except Exception:
+            pass
+
+        try:
+            value = r["vmem"]
+            if value is not None:
+                result["vmem"] = int(result.get("vmem", 0)) + size_to_bytes(value)
+        except Exception:
+            pass
+
+    result["hyperthreading"] = requested_hyperthreading(job)
+
+    return result
 
 class FileLock(object):
     def __init__(self, path):
@@ -630,6 +748,13 @@ class CpuCgroupHook(object):
 
     def begin(self, e):
         job = e.job
+
+        try:
+            validate_local_vnode_cgroups(job)
+        except Exception as exc:
+            e.reject("pbs_job_cgroups_v2: %s" % exc)
+            return False
+
         resc = local_job_resources(job)
         ncpus = int(resc.get("ncpus", 0))
         if ncpus <= 0:
@@ -691,17 +816,23 @@ class CpuCgroupHook(object):
         self.cg.attach_session(e.job.id, int(e.pid))
 
     def update_usage(self, jobid, resources_used, force=False):
-        usage = self.cg.usage(jobid)
-        if not usage:
-            return
         state = self.cg.load_state(jobid) or {}
 
-        # nthreads is the actual number of logical CPUs/PUs exposed by the
-        # cpuset.  It is derived from placement, not independently scheduled.
+        # These values describe the actual CPU placement chosen by this hook
+        # and should be available in resources_used even if cgroup usage files
+        # are temporarily unavailable.
         try:
             resources_used["nthreads"] = int(state.get("nthreads", len(state.get("cpus", []))))
         except Exception:
             pass
+        try:
+            resources_used["hyperthreading"] = bool(state.get("hyperthreading", False))
+        except Exception:
+            pass
+
+        usage = self.cg.usage(jobid)
+        if not usage:
+            return
 
         usage_usec = int(usage.get("usage_usec", 0))
         resources_used["cput"] = int(usage_usec / 1000000)

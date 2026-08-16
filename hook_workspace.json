@@ -1,0 +1,94 @@
+{
+  "state_subdir": "workspace",
+  "scan_refresh": 7200,
+  "fallback_dir": "/var/tmp/pbs.$PBS_JOBID",
+  "scratch_local": {
+    "discover": true,
+    "subtypes": [
+      {
+        "name": "scratch_nvme",
+        "discover": true,
+        "mount_point": "/scratch",
+        "source_patterns": [
+          "/dev/nvme*"
+        ],
+        "rotational": false,
+        "filesystem_patterns": [
+          "ext4",
+          "xfs"
+        ],
+        "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch",
+        "priority": 300,
+        "preserve_nonempty": true
+      },
+      {
+        "name": "scratch_ssd",
+        "discover": true,
+        "mount_point": "/scratch",
+        "source_patterns": [
+          "/dev/sd*",
+          "/dev/mapper/ssd-*"
+        ],
+        "rotational": false,
+        "filesystem_patterns": [
+          "ext4",
+          "xfs"
+        ],
+        "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch",
+        "priority": 200,
+        "preserve_nonempty": true
+      },
+      {
+        "name": "scratch_hdd",
+        "discover": true,
+        "mount_point": "/scratch",
+        "source_patterns": [
+          "/dev/sd*",
+          "/dev/mapper/hdd-*"
+        ],
+        "rotational": true,
+        "filesystem_patterns": [
+          "ext4",
+          "xfs"
+        ],
+        "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch",
+        "priority": 100,
+        "preserve_nonempty": true
+      }
+    ]
+  },
+  "scratch_shared": {
+    "discover": true,
+    "mount_point": "/scratch.shared",
+    "source_patterns": [
+      "*"
+    ],
+    "filesystem_patterns": [
+      "nfs",
+      "nfs4",
+      "lustre",
+      "ceph",
+      "gpfs"
+    ],
+    "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+    "accounting_root": "/scratch.shared",
+    "preserve_nonempty": true
+  },
+  "scratch_shm": {
+    "discover": true,
+    "mount_point": "/dev/shm",
+    "source_patterns": [
+      "tmpfs",
+      "shm",
+      "*"
+    ],
+    "filesystem_patterns": [
+      "tmpfs"
+    ],
+    "job_dir": "/dev/shm/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+    "preserve_nonempty": false
+  }
+}

@@ -1,0 +1,17 @@
+# Custom vnode resources published by hook_discovery_node.py
+# cgroups is string_array so other hooks can test for membership, e.g. "v2" in resources_available.cgroups.
+create resource os type=string,flag=h
+create resource osfamily type=string,flag=h
+create resource cgroups type=string_array,flag=h
+create resource pbs_server type=string,flag=h
+
+# Discovery hook
+create hook discovery_node
+set hook discovery_node event = "exechost_startup,exechost_periodic"
+set hook discovery_node enabled = true
+set hook discovery_node freq = 300
+set hook discovery_node alarm = 30
+set hook discovery_node order = 10
+
+import hook discovery_node application/x-python default hook_discovery_node.py
+import hook discovery_node application/json default hook_discovery_node.json
