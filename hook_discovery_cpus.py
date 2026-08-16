@@ -55,7 +55,7 @@ _SIZE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?)(?:i?b)?\s*$", re
 
 
 def log(level, msg):
-    pbs.logmsg(level, "pbs_discovery_node: " + str(msg))
+    pbs.logmsg(level, "pbs_discovery_cpus: " + str(msg))
 
 
 def deep_merge(base, update):
@@ -404,6 +404,6 @@ except SystemExit:
 except Exception as exc:
     log(pbs.EVENT_ERROR, "%s\n%s" % (exc, traceback.format_exc()))
     try:
-        pbs.event().reject("pbs_discovery_node failed: %s" % exc)
+        pbs.event().reject("pbs_discovery_cpus failed: %s" % exc)
     except Exception:
         pass

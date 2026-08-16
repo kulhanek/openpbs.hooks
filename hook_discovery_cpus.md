@@ -123,4 +123,4 @@ Example:
 - Physical-core detection depends on kernel topology files being correct. If no physical cores can be discovered, the event is rejected.
 - `spec` mapping is string-pattern based and is therefore a site policy, not a hardware benchmark performed by the hook.
 - The hook recognises local vnodes from the local node name; if no local vnode is present in `event.vnode_list`, the event is rejected.
-- Although the implementation log/error prefix still contains `pbs_discovery_node` in places, the functionality of this file is CPU/memory discovery only.
+
