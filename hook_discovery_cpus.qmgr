@@ -26,7 +26,7 @@ set resource hyperthreading flag = h
 
 #
 # ---------------------------------------------------------------------------
-# Node/CPU/memory discovery
+# CPUs+memory discovery
 # ---------------------------------------------------------------------------
 #
 create hook discovery_cpus

@@ -1,17 +1,36 @@
-# Custom vnode resources published by hook_discovery_node.py
-# cgroups is string_array so other hooks can test for membership, e.g. "v2" in resources_available.cgroups.
-create resource os type=string,flag=h
-create resource osfamily type=string,flag=h
-create resource cgroups type=string_array,flag=h
-create resource pbs_server type=string,flag=h
+# node specification --------------------
+create resource os
+set resource os type = string
+set resource os flag = h
 
-# Discovery hook
+create resource osfamily
+set resource osfamily type = string
+set resource osfamily flag = h
+
+create resource cgroups
+set resource cgroups type = string_array
+set resource cgroups flag = h
+
+create resource pbs_server
+set resource pbs_server type = string
+set resource pbs_server flag = h
+
+#
+# ---------------------------------------------------------------------------
+# node discovery
+# ---------------------------------------------------------------------------
+#
 create hook discovery_node
-set hook discovery_node event = "exechost_startup,exechost_periodic"
+set hook discovery_node type = site
 set hook discovery_node enabled = true
-set hook discovery_node freq = 300
+set hook discovery_node event = exechost_startup
+set hook discovery_node event += exechost_periodic
+set hook discovery_node user = pbsadmin
 set hook discovery_node alarm = 30
-set hook discovery_node order = 10
+set hook discovery_node freq = 3600
+set hook discovery_node order = 5
+set hook discovery_node debug = false
+set hook discovery_node fail_action = none
 
-import hook discovery_node application/x-python default hook_discovery_node.py
-import hook discovery_node application/json default hook_discovery_node.json
+import hook discovery_node application/x-python default /root/openpbs.hooks/hook_discovery_node.py
+import hook discovery_node application/x-config default /root/openpbs.hooks/hook_discovery_node.json
