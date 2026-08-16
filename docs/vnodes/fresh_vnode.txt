@@ -1,4 +1,5 @@
-[kulhanek@wolf ~]$ pbsnodes -a
+# This is a content of a new vnode without any hooks modifing it. 
+$ pbsnodes -a
 wolf
      Mom = wolf.ncbr.muni.cz
      ntype = PBS
