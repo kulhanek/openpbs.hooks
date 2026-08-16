@@ -4,7 +4,8 @@ This repository contains a set of OpenPBS hooks intended for small clusters buil
 
 The hooks were tested on **Ubuntu 24.04** and are designed to work with the **cgroups v2** controller. They are primarily aimed at relatively simple OpenPBS installations where execution nodes are managed directly by PBS MoM without an additional cluster resource-management layer.
 
-The code was mostly created in ChatGPT chat (Plus Subscription) and is currently testing on a small cluster. 
+## Notes
+The code was mostly created in ChatGPT chat (Plus Subscription) and is currently tested on a small cluster. 
 
 ## Hooks
 
