@@ -1,5 +1,5 @@
-
-# workspace storage ----------------------
+# workspace storage ---------------------------------------------------------
+# User-facing consumable/availability resources.
 create resource scratch_local
 set resource scratch_local type = size
 set resource scratch_local flag = hn
@@ -8,32 +8,40 @@ create resource scratch_shared
 set resource scratch_shared type = size
 set resource scratch_shared flag = hn
 
-create resource scratch_nvme
-set resource scratch_nvme type = size
-set resource scratch_nvme flag = hn
-
-create resource scratch_ssd
-set resource scratch_ssd type = size
-set resource scratch_ssd flag = hn
-
-create resource scratch_hdd
-set resource scratch_hdd type = size
-set resource scratch_hdd flag = hn
-
 create resource scratch_shm
 set resource scratch_shm type = boolean
 set resource scratch_shm flag = h
 
-#
-# Create and define hook workspace
-#
+# Scheduler-selectable, non-consumable properties describing the persistent
+# discovery-selected backend used by each top-level scratch class.
+create resource scratch_local_subtype
+set resource scratch_local_subtype type = string
+set resource scratch_local_subtype flag = h
+
+create resource scratch_shared_subtype
+set resource scratch_shared_subtype type = string
+set resource scratch_shared_subtype flag = h
+
+create resource scratch_shm_subtype
+set resource scratch_shm_subtype type = string
+set resource scratch_shm_subtype flag = h
+
+# If upgrading from the older workspace hook, remove the obsolete resources
+# scratch_nvme, scratch_ssd and scratch_hdd after ensuring no queued/running
+# jobs still request them.
+
+# Create and define hook workspace.
 create hook workspace
 set hook workspace type = site
 set hook workspace enabled = true
-set hook workspace event = execjob_begin
-set hook workspace event += execjob_end
+set hook workspace event = queuejob
+set hook workspace event += modifyjob
+set hook workspace event += exechost_startup
 set hook workspace event += exechost_periodic
-set hook workspace event += queuejob
+set hook workspace event += execjob_begin
+set hook workspace event += execjob_end
+set hook workspace event += execjob_abort
+set hook workspace event += execjob_resize
 set hook workspace user = pbsadmin
 set hook workspace alarm = 60
 set hook workspace freq = 180
@@ -42,5 +50,3 @@ set hook workspace debug = false
 set hook workspace fail_action = none
 import hook workspace application/x-python default /root/openpbs.hooks/hook_workspace.py
 import hook workspace application/x-config default /root/openpbs.hooks/hook_workspace.json
-
-

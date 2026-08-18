@@ -6,8 +6,8 @@
     "discover": true,
     "subtypes": [
       {
-        "name": "scratch_nvme",
-        "discover": true,
+        "name": "nvme",
+        "priority": 300,
         "mount_point": "/scratch",
         "source_patterns": [
           "/dev/nvme*"
@@ -19,12 +19,11 @@
         ],
         "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
         "accounting_root": "/scratch",
-        "priority": 300,
         "preserve_nonempty": true
       },
       {
-        "name": "scratch_ssd",
-        "discover": true,
+        "name": "ssd",
+        "priority": 200,
         "mount_point": "/scratch",
         "source_patterns": [
           "/dev/sd*",
@@ -37,12 +36,11 @@
         ],
         "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
         "accounting_root": "/scratch",
-        "priority": 200,
         "preserve_nonempty": true
       },
       {
-        "name": "scratch_hdd",
-        "discover": true,
+        "name": "hdd",
+        "priority": 100,
         "mount_point": "/scratch",
         "source_patterns": [
           "/dev/sd*",
@@ -55,40 +53,90 @@
         ],
         "job_dir": "/scratch/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
         "accounting_root": "/scratch",
-        "priority": 100,
         "preserve_nonempty": true
       }
     ]
   },
   "scratch_shared": {
     "discover": true,
-    "mount_point": "/scratch.shared",
-    "source_patterns": [
-      "*"
-    ],
-    "filesystem_patterns": [
-      "nfs",
-      "nfs4",
-      "lustre",
-      "ceph",
-      "gpfs"
-    ],
-    "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
-    "accounting_root": "/scratch.shared",
-    "preserve_nonempty": true
+    "subtypes": [
+      {
+        "name": "nfs",
+        "priority": 100,
+        "mount_point": "/scratch.shared",
+        "source_patterns": [
+          "*"
+        ],
+        "filesystem_patterns": [
+          "nfs",
+          "nfs4"
+        ],
+        "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch.shared",
+        "preserve_nonempty": true
+      },
+      {
+        "name": "lustre",
+        "priority": 100,
+        "mount_point": "/scratch.shared",
+        "source_patterns": [
+          "*"
+        ],
+        "filesystem_patterns": [
+          "lustre"
+        ],
+        "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch.shared",
+        "preserve_nonempty": true
+      },
+      {
+        "name": "ceph",
+        "priority": 100,
+        "mount_point": "/scratch.shared",
+        "source_patterns": [
+          "*"
+        ],
+        "filesystem_patterns": [
+          "ceph"
+        ],
+        "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch.shared",
+        "preserve_nonempty": true
+      },
+      {
+        "name": "gpfs",
+        "priority": 100,
+        "mount_point": "/scratch.shared",
+        "source_patterns": [
+          "*"
+        ],
+        "filesystem_patterns": [
+          "gpfs"
+        ],
+        "job_dir": "/scratch.shared/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "accounting_root": "/scratch.shared",
+        "preserve_nonempty": true
+      }
+    ]
   },
   "scratch_shm": {
     "discover": true,
-    "mount_point": "/dev/shm",
-    "source_patterns": [
-      "tmpfs",
-      "shm",
-      "*"
-    ],
-    "filesystem_patterns": [
-      "tmpfs"
-    ],
-    "job_dir": "/dev/shm/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
-    "preserve_nonempty": false
+    "subtypes": [
+      {
+        "name": "tmpfs",
+        "priority": 100,
+        "mount_point": "/dev/shm",
+        "source_patterns": [
+          "tmpfs",
+          "shm",
+          "*"
+        ],
+        "filesystem_patterns": [
+          "tmpfs"
+        ],
+        "job_dir": "/dev/shm/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
+        "preserve_nonempty": false
+      }
+    ]
   }
 }
