@@ -18,11 +18,15 @@ try:
             node_i = i.split(":")[0].split(".")[0]
 
             if not node_i in resources.keys():
-                resources[node_i] = {"ncpus":0, "mem":0, "ngpus":0}
+                resources[node_i] = {"ncpus":0, "nthreads":0, "mem":0, "ngpus":0}
 
             m = re.search('ncpus=([0-9]+)', i)
             if m:
                 resources[node_i]["ncpus"] += int(m.group(1))
+
+            m = re.search('nthreads=([0-9]+)', i)
+            if m:
+                resources[node_i]["nthreads"] += int(m.group(1))
 
             m = re.search('ngpus=([0-9]+)', i)
             if m:
@@ -39,56 +43,20 @@ try:
             j.Variable_List["TORQUE_RESC_MEM"] = resources[node]["mem"]
 
             j.Variable_List["PBS_NUM_PPN"] = resources[node]["ncpus"]
-            j.Variable_List["PBS_NCPUS"] = resources[node]["ncpus"]
             j.Variable_List["TORQUE_RESC_PROC"] = resources[node]["ncpus"]
             j.Variable_List["PBS_NGPUS"] = resources[node]["ngpus"]
 
-            # Prefer values recorded by the cgroup hook in resources_used.
-            # pbs_resource objects do not reliably implement dict-style iteration,
-            # therefore access custom resources as attributes.
-            nthreads = None
-            hyperthreading = None
-
+            # PBS_SMT is job-wide.  Prefer the value recorded by the cgroup
+            # hook; if unavailable, fall back to false.
+            smt = None
             try:
-                nthreads = getattr(j.resources_used, "nthreads", None)
+                smt = getattr(j.resources_used, "smt", None)
             except Exception:
-                nthreads = None
-
-            try:
-                hyperthreading = getattr(j.resources_used, "hyperthreading", None)
-            except Exception:
-                hyperthreading = None
-
-            if nthreads is None:
-                # Safe fallback: without an explicit value from the cgroup hook,
-                # the number of usable threads is at least the PBS ncpus allocation.
-                nthreads = resources[node]["ncpus"]
-                pbs.logmsg(pbs.EVENT_DEBUG,
-                           "env hook, resources_used.nthreads unavailable; "
-                           "falling back to local ncpus=%s" % str(nthreads))
-            else:
-                nthreads = int(nthreads)
-
-            if hyperthreading is None:
-                # Safe fallback corresponding to nthreads == ncpus.
-                hyperthreading_enabled = False
-                pbs.logmsg(pbs.EVENT_DEBUG,
-                           "env hook, resources_used.hyperthreading unavailable; "
-                           "falling back to n")
-            else:
-                hyperthreading_enabled = str(hyperthreading).strip().lower() in (
-                    "1", "true", "t", "yes", "y", "on"
-                )
-
-            j.Variable_List["PBS_NTHREADS"] = str(nthreads)
-            j.Variable_List["PBS_HYPERTHREADING"] = (
-                "y" if hyperthreading_enabled else "n"
+                smt = None
+            smt_enabled = False if smt is None else str(smt).strip().lower() in (
+                "1", "true", "t", "yes", "y", "on"
             )
-
-            pbs.logmsg(pbs.EVENT_DEBUG,
-                       "env hook, PBS_NTHREADS=%s PBS_HYPERTHREADING=%s" %
-                       (j.Variable_List["PBS_NTHREADS"],
-                        j.Variable_List["PBS_HYPERTHREADING"]))
+            j.Variable_List["PBS_SMT"] = "y" if smt_enabled else "n"
 
         total_mem = 0
         for node_i in resources.keys():
@@ -100,7 +68,29 @@ try:
         for node_i in resources.keys():
             total_ncpus += resources[node_i]["ncpus"]
         j.Variable_List["PBS_RESC_TOTAL_PROCS"] = total_ncpus
-        j.Variable_List["TORQUE_RESC_TOTAL_PROCS"] = total_ncpus        
+        j.Variable_List["TORQUE_RESC_TOTAL_PROCS"] = total_ncpus
+        j.Variable_List["PBS_NCPUS"] = str(total_ncpus)
+
+        # PBS_NTHREADS is job-wide. Prefer resources_used.nthreads produced by
+        # the cgroup hook; otherwise sum nthreads from exec_vnode, falling back
+        # to ncpus for chunks where nthreads is absent (legacy jobs).
+        total_nthreads = None
+        try:
+            value = getattr(j.resources_used, "nthreads", None)
+            if value is not None:
+                total_nthreads = int(value)
+        except Exception:
+            total_nthreads = None
+
+        if total_nthreads is None or total_nthreads <= 0:
+            total_nthreads = 0
+            for node_i in resources.keys():
+                if resources[node_i]["nthreads"] > 0:
+                    total_nthreads += resources[node_i]["nthreads"]
+                else:
+                    total_nthreads += resources[node_i]["ncpus"]
+
+        j.Variable_List["PBS_NTHREADS"] = str(total_nthreads)
 
         j.Variable_List["PBS_NUM_NODES"] = len(resources.keys())
 

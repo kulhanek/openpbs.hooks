@@ -1,6 +1,8 @@
 
 #
 # Create and define hook job_env
+# Run after job_cgroups_v2 (order 10), because this hook consumes
+# resources_used.nthreads and resources_used.smt populated there.
 #
 create hook job_env
 set hook job_env type = site
@@ -8,7 +10,7 @@ set hook job_env enabled = true
 set hook job_env event = execjob_begin
 set hook job_env user = pbsadmin
 set hook job_env alarm = 60
-set hook job_env order = 10
+set hook job_env order = 20
 set hook job_env debug = false
 set hook job_env fail_action = none
 import hook job_env application/x-python default /root/openpbs.hooks/hook_job_env.py
