@@ -1,30 +1,22 @@
 # coding: utf-8
-"""OpenPBS hook for per-job scratch/workspace directories.
+"""OpenPBS hook for dynamically configured per-job scratch workspaces.
 
-User-facing resources:
-    scratch_local=<size>    local workspace
-    scratch_shared=<size>   shared workspace
-    scratch_shm=true        tmpfs/shmem workspace
+Top-level user resources are enumerated from JSON keys named ``scratch_*``.
+Each resource declares its PBS-facing ``type`` (``size`` or ``boolean``) and
+workspace ``kind`` (``local``, ``shared`` or ``shm``). Storage technologies
+are represented by persistently selected subtypes and published through
+``resources_available.<resource>_subtype``.
 
-Each top-level scratch class has one persistently selected discovery subtype.
-Subtypes describe storage technology/backends (for example ``nvme``, ``ssd``,
-``hdd``, ``lustre``, ``nfs`` or ``tmpfs``); they are not consumable scratch
-resources themselves.  The selected subtype is published as a scheduler-
-selectable string resource:
+For size resources, ``capacity_mode=managed`` performs conservative capacity
+accounting using PBS reservations, filesystem free space and optional scans of
+unmanaged data. ``capacity_mode=filesystem_total`` publishes the filesystem
+total size as fixed capacity and never scans unmanaged data or reduces
+capacity according to current filesystem usage. The latter is useful for
+large shared filesystems whose usage is managed outside this hook.
 
-    resources_available.scratch_local_subtype
-    resources_available.scratch_shared_subtype
-    resources_available.scratch_shm_subtype
-
-A subtype is selected by discovery according to configured priority and then
-persisted in MoM-private state.  Periodic discovery only refreshes availability
-and capacity of that selected backend.  It never silently falls back to a
-different subtype if the selected backend becomes unavailable.
-
-Exactly one top-level scratch_* resource is allowed in each select chunk.
+Exactly one configured top-level scratch resource is allowed per select chunk.
 Scratch sizes are scheduler reservation/accounting values, not filesystem
-quotas.  scratch_shm is boolean; its practical capacity is governed by the
-job's memory allocation/cgroup.
+quotas.
 """
 
 import errno
@@ -44,18 +36,10 @@ import traceback
 import pbs
 
 
-SIZE_RESOURCES = ("scratch_local", "scratch_shared")
-BOOLEAN_RESOURCES = ("scratch_shm",)
-USER_RESOURCES = SIZE_RESOURCES + BOOLEAN_RESOURCES
-SUBTYPE_RESOURCES = tuple(resource + "_subtype" for resource in USER_RESOURCES)
-
 DEFAULT_CONFIG = {
     "state_subdir": "workspace",
     "scan_refresh": 7200,
     "fallback_dir": "/var/tmp/pbs.$PBS_JOBID",
-    "scratch_local": {"discover": True, "subtypes": []},
-    "scratch_shared": {"discover": True, "subtypes": []},
-    "scratch_shm": {"discover": True, "subtypes": []},
 }
 
 _SIZE_RE = re.compile(
@@ -138,6 +122,29 @@ def validate_backend(backend):
         raise RuntimeError("preserve_nonempty must be boolean")
 
 
+
+def scratch_resources(cfg):
+    """Return configured top-level scratch resource names."""
+    return tuple(sorted(
+        key for key, value in cfg.items()
+        if key.startswith("scratch_")
+        and not key.endswith("_subtype")
+        and isinstance(value, dict)
+    ))
+
+
+def resource_type(cfg, resource):
+    return str(cfg[resource].get("type", "")).strip().lower()
+
+
+def resource_kind(cfg, resource):
+    return str(cfg[resource].get("kind", "local")).strip().lower()
+
+
+def subtype_resources(cfg):
+    return tuple(resource + "_subtype" for resource in scratch_resources(cfg))
+
+
 def load_config():
     cfg = deep_merge({}, DEFAULT_CONFIG)
     path = os.environ.get("PBS_HOOK_CONFIG_FILE")
@@ -145,15 +152,40 @@ def load_config():
         with open(path, "r") as f:
             cfg = deep_merge(cfg, json.load(f))
 
-    for resource in USER_RESOURCES:
-        section = cfg.get(resource)
-        if section is None:
-            section = {"discover": False, "subtypes": []}
-            cfg[resource] = section
-        if not isinstance(section, dict):
-            raise RuntimeError("%s must be a JSON object or null" % resource)
+    resources = scratch_resources(cfg)
+    if not resources:
+        raise RuntimeError("no top-level scratch_* resources are configured")
+
+    for resource in resources:
+        section = cfg[resource]
+
+        rtype = resource_type(cfg, resource)
+        if rtype not in ("size", "boolean"):
+            raise RuntimeError(
+                "%s.type must be 'size' or 'boolean'" % resource
+            )
+
+        kind = resource_kind(cfg, resource)
+        if kind not in ("local", "shared", "shm"):
+            raise RuntimeError(
+                "%s.kind must be 'local', 'shared', or 'shm'" % resource
+            )
+
         if section.get("discover", True) not in (True, False):
             raise RuntimeError("%s.discover must be boolean" % resource)
+
+        capacity_mode = str(section.get("capacity_mode", "managed")).lower()
+        if rtype == "size" and capacity_mode not in (
+            "managed", "filesystem_total"
+        ):
+            raise RuntimeError(
+                "%s.capacity_mode must be 'managed' or 'filesystem_total'"
+                % resource
+            )
+
+        if "place_group" in section and not str(section["place_group"]).strip():
+            raise RuntimeError("%s.place_group must not be empty" % resource)
+
         subtypes = section.get("subtypes", [])
         if not isinstance(subtypes, list):
             raise RuntimeError("%s.subtypes must be a list" % resource)
@@ -161,6 +193,20 @@ def load_config():
         seen = set()
         for backend in subtypes:
             validate_backend(backend)
+
+            if "capacity_mode" in backend:
+                mode = str(backend["capacity_mode"]).lower()
+                if rtype != "size":
+                    raise RuntimeError(
+                        "%s subtype %s: capacity_mode is valid only for "
+                        "size resources" % (resource, backend["name"])
+                    )
+                if mode not in ("managed", "filesystem_total"):
+                    raise RuntimeError(
+                        "%s subtype %s: capacity_mode must be 'managed' or "
+                        "'filesystem_total'" % (resource, backend["name"])
+                    )
+
             name = str(backend["name"])
             if name in seen:
                 raise RuntimeError(
@@ -169,7 +215,6 @@ def load_config():
             seen.add(name)
 
     return cfg
-
 
 def size_to_bytes(value):
     if value is None:
@@ -211,9 +256,10 @@ def _bool_true(value):
     return str(value).strip().lower() in ("true", "t", "1", "yes", "on")
 
 
-def local_resources(job):
-    """Return top-level scratch reservations assigned to this MoM."""
+def local_resources(job, cfg):
+    """Return configured top-level scratch reservations assigned to this MoM."""
     out = {}
+    resources_to_check = scratch_resources(cfg)
     try:
         chunks = job.exec_vnode.chunks
     except Exception:
@@ -223,14 +269,14 @@ def local_resources(job):
         if not vnode_is_local(chunk.vnode_name):
             continue
         resources = chunk.chunk_resources
-        for resource in USER_RESOURCES:
+        for resource in resources_to_check:
             try:
                 value = resources[resource]
             except Exception:
                 continue
             if value is None:
                 continue
-            if resource in BOOLEAN_RESOURCES:
+            if resource_type(cfg, resource) == "boolean":
                 if _bool_true(value):
                     out[resource] = True
             else:
@@ -243,7 +289,7 @@ def local_resources(job):
     return out
 
 
-def total_request(job, resource):
+def total_request(job, resource, cfg):
     total = 0
     try:
         chunks = job.exec_vnode.chunks
@@ -252,7 +298,7 @@ def total_request(job, resource):
     for chunk in chunks:
         try:
             value = chunk.chunk_resources[resource]
-            if resource in BOOLEAN_RESOURCES:
+            if resource_type(cfg, resource) == "boolean":
                 total += 1 if _bool_true(value) else 0
             else:
                 total += size_to_bytes(value)
@@ -770,16 +816,53 @@ class Accounting(object):
             return {"usable": False, "reason": probe.get("reason", "unusable"), "reservable": 0, "resource": resource, "subtype": subtype}
 
         states = self.live_states(event)
-        filtered = {jobid: value for jobid, value in states.items() if exclude is None or str(jobid) != str(exclude)}
-        live_paths = [value["path"] for value in filtered.values() if value.get("requested_resource") == resource and value.get("subtype") == subtype and value.get("path")]
-        unmanaged = unmanaged_cached(self.state, "%s.%s" % (resource, subtype), backend, live_paths, self.cfg, probe)
-        reserved = self.reserved(filtered, resource=resource, subtype=subtype)
-        workspace = max(0, int(probe["total"]) - unmanaged)
-        headroom = max(0, workspace - reserved)
-        reservable = max(0, min(headroom, int(probe["free"])))
-        return dict(probe, usable=True, resource=resource, subtype=subtype,
-                    unmanaged=unmanaged, reserved=reserved, workspace=workspace,
-                    reservable=reservable)
+        filtered = {
+            jobid: value for jobid, value in states.items()
+            if exclude is None or str(jobid) != str(exclude)
+        }
+        reserved = self.reserved(
+            filtered, resource=resource, subtype=subtype
+        )
+
+        section = self.cfg[resource]
+        capacity_mode = str(
+            backend.get(
+                "capacity_mode",
+                section.get("capacity_mode", "managed")
+            )
+        ).lower()
+
+        if capacity_mode == "filesystem_total":
+            # Deliberately lightweight: no directory walk and no reduction
+            # by current filesystem usage/free space. PBS consumes from the
+            # fixed total capacity through its normal consumable accounting.
+            unmanaged = 0
+            workspace = max(0, int(probe["total"]))
+            reservable = max(0, workspace - reserved)
+        else:
+            live_paths = [
+                value["path"] for value in filtered.values()
+                if value.get("requested_resource") == resource
+                and value.get("subtype") == subtype
+                and value.get("path")
+            ]
+            unmanaged = unmanaged_cached(
+                self.state,
+                "%s.%s" % (resource, subtype),
+                backend,
+                live_paths,
+                self.cfg,
+                probe
+            )
+            workspace = max(0, int(probe["total"]) - unmanaged)
+            headroom = max(0, workspace - reserved)
+            reservable = max(0, min(headroom, int(probe["free"])))
+
+        return dict(
+            probe, usable=True, resource=resource, subtype=subtype,
+            capacity_mode=capacity_mode, unmanaged=unmanaged,
+            reserved=reserved, workspace=workspace, reservable=reservable
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +904,7 @@ def remove_dir(path, preserve_nonempty):
         shutil.rmtree(path)
 
 
-def set_env(job, path, requested_resource, subtype, local_size, total_size):
+def set_env(job, path, requested_resource, subtype, local_size, total_size, cfg):
     variables = job.Variable_List
     for key in ("SCRATCHDIR", "SCRATCH", "SINGULARITY_TMPDIR", "SINGULARITY_CACHEDIR"):
         variables[key] = path
@@ -834,14 +917,10 @@ def set_env(job, path, requested_resource, subtype, local_size, total_size):
     variables["SCRATCH_RESOURCE"] = requested_resource
     variables["SCRATCH_SUBTYPE"] = subtype
 
-    if requested_resource == "scratch_local":
-        variables["SCRATCH_TYPE"] = "local"
-    elif requested_resource == "scratch_shared":
-        variables["SCRATCH_TYPE"] = "shared"
-    elif requested_resource == "scratch_shm":
-        variables["SCRATCH_TYPE"] = "shm"
-    else:
+    if requested_resource == "none":
         variables["SCRATCH_TYPE"] = "none"
+    else:
+        variables["SCRATCH_TYPE"] = resource_kind(cfg, requested_resource)
 
     if requested_resource != "none":
         env_name = "PBS_RESC_" + requested_resource.upper()
@@ -870,40 +949,83 @@ class WorkspaceHook(object):
         if not select:
             return True
 
+        resources = scratch_resources(self.cfg)
+        allowed = set(resources + subtype_resources(self.cfg))
+        requested_groups = []
+
         for chunk in select.split("+"):
             found = []
-            for resource in USER_RESOURCES:
-                if re.search(r"(^|:)" + re.escape(resource) + r"=", chunk):
-                    found.append(resource)
+            for resource in resources:
+                match = re.search(
+                    r"(?:^|:)" + re.escape(resource) + r"=([^:]+)",
+                    chunk,
+                    re.I
+                )
+                if not match:
+                    continue
 
-            # scratch_*_subtype are properties and do not count as scratch
-            # reservations. Any other scratch_* resource is rejected.
-            all_scratch = re.findall(r"(?:^|:)(scratch_[A-Za-z0-9_]+)=", chunk)
-            allowed = set(USER_RESOURCES + SUBTYPE_RESOURCES)
-            unsupported = [name for name in all_scratch if name not in allowed]
+                found.append(resource)
+                value = match.group(1)
+                if resource_type(self.cfg, resource) == "boolean":
+                    if not _bool_true(value):
+                        event.reject(
+                            "%s is a boolean resource and must be requested "
+                            "as %s=true" % (resource, resource)
+                        )
+                        return False
+                else:
+                    try:
+                        if size_to_bytes(value) <= 0:
+                            raise ValueError()
+                    except Exception:
+                        event.reject(
+                            "%s must be requested as a positive size"
+                            % resource
+                        )
+                        return False
+
+            all_scratch = re.findall(
+                r"(?:^|:)(scratch_[A-Za-z0-9_]+)=", chunk
+            )
+            unsupported = [
+                name for name in all_scratch if name not in allowed
+            ]
             if unsupported:
-                event.reject("unsupported scratch resource(s) in select chunk: %s" % ", ".join(sorted(set(unsupported))))
+                event.reject(
+                    "unsupported scratch resource(s) in select chunk: %s"
+                    % ", ".join(sorted(set(unsupported)))
+                )
                 return False
 
             if len(found) > 1:
-                event.reject("only one top-level scratch resource is allowed per select chunk; found: %s" % ", ".join(found))
+                event.reject(
+                    "only one top-level scratch resource is allowed per "
+                    "select chunk; found: %s" % ", ".join(found)
+                )
                 return False
 
-            shm_match = re.search(r"(?:^|:)scratch_shm=([^:]+)", chunk, re.I)
-            if shm_match and not _bool_true(shm_match.group(1)):
-                event.reject("scratch_shm is a boolean resource and must be requested as scratch_shm=true")
-                return False
+            if found:
+                group = self.cfg[found[0]].get("place_group")
+                if group:
+                    requested_groups.append(str(group))
 
-            # A subtype property without the matching top-level resource is
-            # allowed: it can be used purely as a node-selection property.
+        groups = sorted(set(requested_groups))
+        if len(groups) > 1:
+            event.reject(
+                "requested scratch resources require conflicting placement "
+                "groups: %s" % ", ".join(groups)
+            )
+            return False
 
-        if re.search(r"(^|:)scratch_shared=", select):
+        if groups:
             try:
                 place = str(job.Resource_List["place"])
             except Exception:
                 place = ""
             if "group=" not in place:
-                job.Resource_List["place"] = pbs.place((place + ":" if place else "") + "group=cluster")
+                job.Resource_List["place"] = pbs.place(
+                    (place + ":" if place else "") + "group=" + groups[0]
+                )
         return True
 
     def _publish_size(self, event, resource, capacity):
@@ -930,7 +1052,7 @@ class WorkspaceHook(object):
 
     def publish(self, event):
         mounts = mount_table()
-        for resource in USER_RESOURCES:
+        for resource in scratch_resources(self.cfg):
             section = self.cfg.get(resource, {})
             if not bool(section.get("discover", True)):
                 continue
@@ -938,7 +1060,7 @@ class WorkspaceHook(object):
             subtype, backend, _ = self._selected(resource, mounts)
             if subtype is None or backend is None:
                 log(pbs.EVENT_DEBUG, "%s has no usable subtype to select" % resource)
-                if resource in SIZE_RESOURCES:
+                if resource_type(self.cfg, resource) == "size":
                     self._publish_size(event, resource, 0)
                 else:
                     self._publish_bool(event, resource, False)
@@ -949,7 +1071,7 @@ class WorkspaceHook(object):
             self._publish_subtype(event, resource, subtype)
             probe = probe_backend(backend, mounts)
 
-            if resource in BOOLEAN_RESOURCES:
+            if resource_type(self.cfg, resource) == "boolean":
                 self._publish_bool(event, resource, bool(probe.get("usable")))
                 if not probe.get("usable"):
                     log(pbs.EVENT_DEBUG, "%s subtype=%s unavailable: %s" % (resource, subtype, probe.get("reason", "unusable")))
@@ -964,8 +1086,12 @@ class WorkspaceHook(object):
             self._publish_size(event, resource, capacity)
 
             if status.get("usable"):
-                log(pbs.EVENT_DEBUG, "%s subtype=%s source=%s backing=%s fs=%s free=%d unmanaged=%d reserved=%d reservable=%d" % (
-                    resource, subtype, status["source"], status.get("backing_devices", []), status["filesystem"], status["free"], status["unmanaged"], status["reserved"], status["reservable"]))
+                log(pbs.EVENT_DEBUG, "%s subtype=%s mode=%s source=%s backing=%s fs=%s total=%d free=%d unmanaged=%d reserved=%d reservable=%d" % (
+                    resource, subtype, status.get("capacity_mode", "managed"),
+                    status["source"], status.get("backing_devices", []),
+                    status["filesystem"], status["total"], status["free"],
+                    status["unmanaged"], status["reserved"],
+                    status["reservable"]))
             else:
                 log(pbs.EVENT_DEBUG, "%s subtype=%s unavailable: %s" % (resource, subtype, status.get("reason", "unusable")))
         return True
@@ -991,10 +1117,10 @@ class WorkspaceHook(object):
 
     def begin(self, event):
         job = event.job
-        resources = local_resources(job)
+        resources = local_resources(job, self.cfg)
         requested = []
-        for resource in USER_RESOURCES:
-            if resource in BOOLEAN_RESOURCES:
+        for resource in scratch_resources(self.cfg):
+            if resource_type(self.cfg, resource) == "boolean":
                 if bool(resources.get(resource, False)):
                     requested.append((resource, True))
             else:
@@ -1009,7 +1135,7 @@ class WorkspaceHook(object):
         if not requested:
             user, _ = identity(job)
             path = expand_template(self.cfg.get("fallback_dir", "/var/tmp/pbs.$PBS_JOBID"), job, user)
-            set_env(job, path, "none", "none", 0, 0)
+            set_env(job, path, "none", "none", 0, 0, self.cfg)
             return True
 
         requested_resource, requested_value = requested[0]
@@ -1027,21 +1153,22 @@ class WorkspaceHook(object):
 
         path = expand_template(backend["job_dir"], job, user)
 
-        if requested_resource == "scratch_shm":
+        if resource_type(self.cfg, requested_resource) == "boolean":
             with self.state.lock():
                 create_dir(path, backend, job, user, group)
                 self.state.save(job.id, {
-                    "jobid": str(job.id), "created": time.time(), "kind": "shm",
+                    "jobid": str(job.id), "created": time.time(),
+                    "kind": resource_kind(self.cfg, requested_resource),
                     "requested_resource": requested_resource, "subtype": subtype,
                     "requested_bytes": 0, "path": path,
                     "mount_point": backend["mount_point"],
                     "preserve_nonempty": bool(backend.get("preserve_nonempty", False)),
                 })
-            set_env(job, path, requested_resource, subtype, 0, 0)
+            set_env(job, path, requested_resource, subtype, 0, 0, self.cfg)
             return True
 
         requested_bytes = int(requested_value)
-        shared = requested_resource == "scratch_shared"
+        shared = resource_kind(self.cfg, requested_resource) == "shared"
         # Shared directory/state is owned by mother-superior only.  Sister
         # MoMs still receive identical environment variables.
         if (not shared) or job.in_ms_mom():
@@ -1061,7 +1188,7 @@ class WorkspaceHook(object):
                     "preserve_nonempty": bool(backend.get("preserve_nonempty", True)),
                 })
 
-        set_env(job, path, requested_resource, subtype, requested_bytes, total_request(job, requested_resource))
+        set_env(job, path, requested_resource, subtype, requested_bytes, total_request(job, requested_resource, self.cfg), self.cfg)
         log(pbs.EVENT_DEBUG, "%s: %s=%d subtype=%s -> %s" % (job.id, requested_resource, requested_bytes, subtype, path))
         return True
 

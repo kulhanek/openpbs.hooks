@@ -2,11 +2,13 @@
 
 ## 1. Overview
 
-`hook_workspace` provides per-job workspace directories using three top-level scratch classes:
+`hook_workspace` provides per-job workspace directories through top-level `scratch_*` resources defined in the JSON configuration. The supplied configuration defines:
 
 - `scratch_local` — node-local disk/SSD/NVMe workspace, expressed as a consumable size;
 - `scratch_shared` — shared-filesystem workspace, expressed as a consumable size;
 - `scratch_shm` — tmpfs/shared-memory workspace, expressed as a boolean.
+
+The Python hook does not contain a fixed list of these resources. It enumerates configured top-level `scratch_*` sections and obtains each resource's `type` and `kind` from the configuration. New scratch classes can therefore be added without changing the hook code, provided matching PBS resources are created with `qmgr`.
 
 Storage technologies are represented by **subtypes**, not by separate consumable scratch resources. During node discovery the hook chooses one configured subtype for each top-level scratch class, persists that choice, and publishes it through `resources_available.<resource>_subtype`. For example, a node may publish:
 
@@ -67,12 +69,12 @@ A subtype property can also be used by itself as a general node-selection constr
 ### Request restrictions
 
 - Scratch resources must be requested through `select` chunks handled by the hook.
-- At most one **top-level** scratch resource (`scratch_local`, `scratch_shared`, or `scratch_shm`) is allowed per select chunk.
-- `scratch_shm` is boolean and must be requested as a true value.
-- `scratch_local` and `scratch_shared` are positive size resources.
+- At most one configured **top-level** scratch resource is allowed per select chunk.
+- Resources configured with `type=boolean` must be requested as a true value.
+- Resources configured with `type=size` must have a positive size when assigned.
 - Former resources such as `scratch_nvme`, `scratch_ssd`, and `scratch_hdd` are no longer supported. Use `scratch_local=<size>:scratch_local_subtype=<subtype>` when a particular local storage technology is required.
 - Dynamic scratch resizing is unsupported; `execjob_resize` is rejected.
-- When `scratch_shared` is requested, the queue/modify hook adds `group=cluster` to `place` if no `group=` component is already present.
+- A resource with `place_group` configured causes the queue/modify hook to add `group=<place_group>` to `place` when no `group=` component is already present. In the supplied configuration this gives `scratch_shared` the historical `group=cluster` behaviour.
 
 ### Environment variables
 
@@ -114,7 +116,7 @@ The hook handles:
 
 ### Persistent subtype selection
 
-Each of `scratch_local`, `scratch_shared`, and `scratch_shm` contains an ordered-by-priority set of discovery candidates under `subtypes`.
+Each configured top-level scratch resource contains an ordered-by-priority set of discovery candidates under `subtypes`.
 
 If no subtype has yet been selected for a top-level resource, discovery probes all configured candidates that currently satisfy their mount/source/filesystem/rotational constraints. Usable candidates are sorted by descending `priority` and then by subtype name; the first candidate is selected.
 
@@ -130,7 +132,7 @@ Once selected, a subtype remains selected while its name remains present in the 
 - `scratch_shm` publishes `false`;
 - the corresponding `<resource>_subtype` property remains unchanged.
 
-This prevents the semantic meaning of `scratch_local`, `scratch_shared`, or `scratch_shm` from changing underneath queued/running jobs.
+This prevents the semantic meaning of a top-level scratch resource from changing underneath queued/running jobs.
 
 A new automatic selection occurs when there is no persisted selection or when the persisted subtype name is no longer present in that resource's configuration. To force complete rediscovery manually, remove `selected_subtypes.json` while the MoM/hook is not running and then restart/reload discovery.
 
@@ -146,15 +148,18 @@ The hook resolves leaf block devices through device-mapper/LVM/MD stacks using s
 
 Filesystem free bytes are obtained from `statvfs(...).f_bavail`.
 
-### Reservation and unmanaged-data accounting
+### Capacity and reservation accounting
 
-For size resources (`scratch_local` and `scratch_shared`), reservation state is associated with the top-level resource **and its selected subtype**. The hook tracks live PBS workspace reservations and optionally scans `accounting_root` for unmanaged allocated data.
+Size resources support two capacity modes, selected with `capacity_mode` on the top-level resource (or overridden for an individual subtype):
 
-Published capacity is constructed so PBS can subtract reservations made against the same top-level consumable resource without the hook double-counting its own reservation state.
+- `managed` — the original conservative mode. The hook tracks live PBS reservations, scans `accounting_root` for unmanaged allocated data, and uses current filesystem free space as an additional limit. The published capacity is constructed so PBS can subtract its own consumable assignments without double-counting the hook's reservation state.
+- `filesystem_total` — lightweight mode intended especially for large shared filesystems. The hook uses only `statvfs(...).f_blocks` to obtain the filesystem's total size. It does **not** scan unmanaged data and does **not** reduce advertised capacity according to current filesystem usage/free space. PBS subtracts scheduled consumable assignments from that fixed capacity.
 
-Because one subtype is fixed per top-level resource, capacities from different subtypes are never summed or dynamically substituted.
+For `filesystem_total`, begin-time reservation checking likewise uses `filesystem_total - known PBS reservations`; it deliberately does not inspect unmanaged consumption. This is appropriate when filesystem quotas, capacity policy, or contention are managed outside this hook.
 
-`scratch_shm` performs no independent byte reservation. Its usable capacity is governed by the job's requested memory and the memory cgroup.
+Reservation state is associated with the top-level resource **and its selected subtype**. Because one subtype is fixed per top-level resource, capacities from different subtypes are never summed or dynamically substituted.
+
+Boolean resources such as the supplied `scratch_shm` perform no independent byte reservation. Their practical capacity is governed by the relevant external limit (for `scratch_shm`, the job's requested memory and memory cgroup).
 
 ### Workspace creation and reruns
 
@@ -183,22 +188,22 @@ Shared scratch creation/state/cleanup is performed only by the mother-superior M
 | Item | Type | Default | Description |
 |---|---:|---:|---|
 | `state_subdir` | string | `workspace` | State/cache directory below `PBS_MOM_HOME/mom_priv/`. |
-| `scan_refresh` | integer seconds | `7200` | Lifetime of cached unmanaged-space scans; can be overridden per subtype. |
+| `scan_refresh` | integer seconds | `7200` | Lifetime of cached unmanaged-space scans used by `managed` capacity mode; can be overridden per subtype. |
 | `fallback_dir` | path template | `/var/tmp/pbs.$PBS_JOBID` | Path exported when no scratch resource is requested. |
-| `scratch_local` | object/null | enabled object | Local scratch class and discovery subtypes. |
-| `scratch_shared` | object/null | enabled object | Shared scratch class and discovery subtypes. |
-| `scratch_shm` | object/null | enabled object | Shared-memory scratch class and discovery subtypes. |
+| `scratch_*` | object | none | Any top-level key beginning with `scratch_` (except a `_subtype` name) and containing a resource definition becomes a user-facing scratch resource. |
 
-Setting a scratch-class section to `null` is equivalent to `discover=false` with no configured subtypes.
-
-### JSON configuration: scratch-class object
-
-The same structure is used for all three top-level resources:
+### JSON configuration: scratch-resource object
 
 | Item | Type | Description |
 |---|---|---|
-| `discover` | boolean | If true, the hook publishes `resources_available.<resource>` and `<resource>_subtype`. |
+| `type` | string | Required. `size` or `boolean`; determines request parsing and publication type. |
+| `kind` | string | `local` (default), `shared`, or `shm`. It controls `SCRATCH_TYPE` and shared mother-superior directory/state handling. |
+| `discover` | boolean | If true, publish `resources_available.<resource>` and `<resource>_subtype`. Default true. |
+| `capacity_mode` | string | For `size` resources: `managed` (default) or `filesystem_total`. See capacity accounting above. |
+| `place_group` | string | Optional PBS placement group automatically appended as `group=<value>` when this resource is requested and `place` has no group. |
 | `subtypes` | array | Candidate backend definitions. Discovery persistently selects one usable candidate. |
+
+The supplied configuration uses `capacity_mode=managed` for `scratch_local` and `capacity_mode=filesystem_total` for `scratch_shared`, avoiding potentially expensive scans of the shared filesystem.
 
 ### JSON configuration: subtype object
 
@@ -211,17 +216,18 @@ The same structure is used for all three top-level resources:
 | `source_patterns` | No | Non-empty shell-glob list matched against the mounted source and/or resolved leaf devices; default `[*]`. |
 | `filesystem_patterns` | No | Non-empty shell-glob list matched against filesystem type; default `[*]`. |
 | `rotational` | No | `true` requires rotational storage, `false` non-rotational storage, `null`/omitted disables the check. |
-| `accounting_root` | No | Root scanned for unmanaged space; defaults to `mount_point`. Relevant to size resources. |
-| `scan_refresh` | No | Per-subtype override of global unmanaged-scan cache lifetime. |
-| `scan_enabled` | No | Enable/disable unmanaged-data scanning; default true. |
+| `capacity_mode` | No | Per-subtype override of the resource-level `capacity_mode`; `managed` or `filesystem_total`. |
+| `accounting_root` | No | Root scanned for unmanaged space; defaults to `mount_point`. Used only in `managed` mode. |
+| `scan_refresh` | No | Per-subtype override of global unmanaged-scan cache lifetime; used only in `managed` mode. |
+| `scan_enabled` | No | Enable/disable unmanaged-data scanning within `managed` mode; default true. This is distinct from `filesystem_total`, which bypasses scanning and free-space reduction entirely. |
 | `preserve_nonempty` | No | Cleanup policy. Defaults effectively to true for disk/shared and false for shm state. |
 | `rerun_prefix` | No | Prefix for preserved rerun directories; default `.run_count`. |
 
-The supplied configuration maps local storage to `nvme`, `ssd`, or `hdd`; shared storage to `nfs`, `lustre`, `ceph`, or `gpfs`; and shared memory to `tmpfs`.
+The supplied configuration maps local storage to `nvme`, `ssd`, or `hdd`; shared storage to `nfs`, `lustre`, `ceph`, or `gpfs`; and shared memory to `tmpfs`. Resource enumeration itself is dynamic; these three top-level resource names are examples defined by the supplied JSON.
 
 ### PBS resource configuration
 
-The top-level size resources are consumable host resources:
+The hook discovers its resource list from JSON, but OpenPBS resource objects must still be created explicitly with `qmgr`. Their PBS type must match the JSON `type`. The supplied configuration therefore defines these size resources:
 
 ```text
 scratch_local          type=size     flag=hn
@@ -248,7 +254,8 @@ If upgrading from the previous design, `scratch_nvme`, `scratch_ssd`, and `scrat
 
 - Scratch sizes are reservations, not filesystem quotas.
 - Persistent subtype selection deliberately prefers semantic stability over automatic failover. A failed selected backend makes the top-level resource unavailable until the backend returns or the selection is explicitly reset/reconfigured.
-- Capacity accounting is based on filesystem free-space snapshots, persistent hook reservations, and periodic unmanaged-data scans; it is accounting-oriented rather than transactional quota enforcement.
+- `managed` capacity accounting is based on filesystem free-space snapshots, persistent hook reservations, and periodic unmanaged-data scans; it is accounting-oriented rather than transactional quota enforcement.
+- `filesystem_total` deliberately ignores unmanaged/current filesystem usage. It is lightweight but can advertise more space than is currently free, so it should be used only where external quota/capacity management makes that behaviour appropriate.
 - Source/rotational classification depends on Linux mount/sysfs information.
 - `scratch_shared` capacity is published per vnode even though the filesystem itself may be common to multiple nodes; site scheduling policy and `group=cluster` placement must therefore be appropriate for the shared-storage topology.
 - Dynamic resizing is deliberately unsupported.

@@ -16,4 +16,4 @@ The code was mostly created in ChatGPT chat (Plus Subscription) and is currently
 - [hook_job_cgroups_v2](hook_job_cgroups_v2.md) — creates per-job cgroups v2, allocates physical CPU cores, optionally enables SMT PU siblings, enforces memory limits, and provides CPU/memory accounting.
 - [hook_job_gpus](hook_job_gpus.md) — allocates whole NVIDIA GPUs, applies cgroups v2 device isolation, sets CUDA visibility, and collects lightweight GPU accounting data.
 - [hook_job_env](hook_job_env.md) — exports PBS/Torque-compatible environment variables describing the resources assigned to a job.
-- [hook_workspace](hook_workspace.md) — provides top-level local, shared, and shared-memory workspaces, persistently selects a storage subtype during node discovery, publishes scheduler-selectable subtype properties, and manages reservation accounting and job directories.
+- [hook_workspace](hook_workspace.md) — provides dynamically configured scratch resources, persistently selects storage subtypes during node discovery, publishes scheduler-selectable subtype properties, and supports managed or filesystem-total capacity accounting.

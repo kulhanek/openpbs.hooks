@@ -55,7 +55,10 @@
         "accounting_root": "/scratch",
         "preserve_nonempty": true
       }
-    ]
+    ],
+    "type": "size",
+    "kind": "local",
+    "capacity_mode": "managed"
   },
   "scratch_shared": {
     "discover": true,
@@ -117,7 +120,11 @@
         "accounting_root": "/scratch.shared",
         "preserve_nonempty": true
       }
-    ]
+    ],
+    "type": "size",
+    "kind": "shared",
+    "capacity_mode": "filesystem_total",
+    "place_group": "cluster"
   },
   "scratch_shm": {
     "discover": true,
@@ -137,6 +144,8 @@
         "job_dir": "/dev/shm/$USER/batch_system_jobs/job_$PBS_JOBID_SHORT",
         "preserve_nonempty": false
       }
-    ]
+    ],
+    "type": "boolean",
+    "kind": "shm"
   }
 }

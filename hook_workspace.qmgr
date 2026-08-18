@@ -1,4 +1,7 @@
 # workspace storage ---------------------------------------------------------
+# PBS resource objects are explicit OpenPBS configuration. The hook itself
+# enumerates top-level scratch_* resources dynamically from hook_workspace.json.
+# Keep this list aligned with the JSON resource definitions.
 # User-facing consumable/availability resources.
 create resource scratch_local
 set resource scratch_local type = size
