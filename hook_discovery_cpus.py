@@ -6,7 +6,9 @@ Published vnode resources
 -------------------------
 * ncpus          : number of physical CPU cores (PBS-consumable CPU capacity)
 * nthreads       : number of online logical CPUs/PUs (informational)
-* hyperthreading : True when nthreads > ncpus
+* smt            : True when nthreads > ncpus
+* hybrid_cpu     : True when SMT is present and physical cores have unequal PU counts
+* npus_per_core  : uniform PUs per physical core, or "1" without SMT/on hybrid CPUs
 * mem            : usable physical memory after configured reserve
 * vmem           : usable physical memory + configured system swap
 * cpu_model      : CPU model name(s)
@@ -24,7 +26,9 @@ Recommended events
 Suggested custom PBS resources
 ------------------------------
     nthreads       : long
-    hyperthreading : boolean
+    smt            : boolean
+    hybrid_cpu     : boolean
+    npus_per_core  : string
     cpu_model      : string_array (or string on homogeneous nodes)
     cpu_vendor     : string_array (or string on homogeneous nodes)
     cpu_flag       : string_array
@@ -257,6 +261,22 @@ class CpuTopology(object):
     def nthreads(self):
         return sum(len(core) for core in self.cores)
 
+    @property
+    def smt(self):
+        return self.nthreads > self.ncpus
+
+    @property
+    def hybrid_cpu(self):
+        if not self.smt:
+            return False
+        return len(set(len(core) for core in self.cores)) > 1
+
+    @property
+    def npus_per_core(self):
+        if not self.smt or self.hybrid_cpu:
+            return "1"
+        return str(len(self.cores[0]))
+
 
 class NodeDiscovery(object):
     def __init__(self):
@@ -343,7 +363,9 @@ class NodeDiscovery(object):
         result = {
             "ncpus": topo.ncpus,
             "nthreads": topo.nthreads,
-            "hyperthreading": topo.nthreads > topo.ncpus,
+            "smt": topo.smt,
+            "hybrid_cpu": topo.hybrid_cpu,
+            "npus_per_core": topo.npus_per_core,
             "mem": bytes_to_pbs_size(mem),
             "vmem": bytes_to_pbs_size(vmem),
             "spec": map_cpu_spec(
@@ -377,11 +399,13 @@ class NodeDiscovery(object):
 
         log(
             pbs.EVENT_DEBUG,
-            "published ncpus=%d nthreads=%d hyperthreading=%s mem=%s%s cpu_vendor=%s spec=%s"
+            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s spec=%s"
             % (
                 resources["ncpus"],
                 resources["nthreads"],
-                resources["hyperthreading"],
+                resources["smt"],
+                resources["hybrid_cpu"],
+                resources["npus_per_core"],
                 resources["mem"],
                 " vmem=%s" % resources["vmem"] if self.cfg.get("publish_vmem", True) else "",
                 resources.get("cpu_vendor", ""),

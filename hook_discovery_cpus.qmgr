@@ -1,5 +1,9 @@
+# ---------------------------------------------------------------------------
+# CPUs+memory discovery
+# ---------------------------------------------------------------------------
 
 # CPU specification --------------------
+
 create resource cpu_model
 set resource cpu_model type = string
 set resource cpu_model flag = h
@@ -8,27 +12,35 @@ create resource cpu_vendor
 set resource cpu_vendor type = string
 set resource cpu_vendor flag = h
 
-create resource spec
-set resource spec type = float
-set resource spec flag = h
-
 create resource cpu_flag
 set resource cpu_flag type = string_array
 set resource cpu_flag flag = h
 
+create resource spec
+set resource spec type = float
+set resource spec flag = h
+
+# CPU resources --------------------
+
 create resource nthreads
 set resource nthreads type = long
-set resource nthreads flag = h
+set resource nthreads flag = hn
 
-create resource hyperthreading
-set resource hyperthreading type = boolean
-set resource hyperthreading flag = h
+create resource smt
+set resource smt type = boolean
+set resource smt flag = h
 
-#
+create resource hybrid_cpu
+set resource hybrid_cpu type = boolean
+set resource hybrid_cpu flag = h
+
+create resource npus_per_core
+set resource npus_per_core type = string
+set resource npus_per_core flag = h
+
 # ---------------------------------------------------------------------------
 # CPUs+memory discovery
 # ---------------------------------------------------------------------------
-#
 create hook discovery_cpus
 set hook discovery_cpus type = site
 set hook discovery_cpus enabled = true
@@ -43,4 +55,3 @@ set hook discovery_cpus fail_action = none
 
 import hook discovery_cpus application/x-python default /root/openpbs.hooks/hook_discovery_cpus.py
 import hook discovery_cpus application/x-config default /root/openpbs.hooks/hook_discovery_cpus.json
-
