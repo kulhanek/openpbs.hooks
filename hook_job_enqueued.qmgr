@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# CPU request normalization / MPI+OpenMP validation
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# queuejob hook
+# ---------------------------------------------------------------------------
+create hook job_enqueued
+set hook job_enqueued type = site
+set hook job_enqueued enabled = true
+set hook job_enqueued event = queuejob
+set hook job_enqueued user = pbsadmin
+set hook job_enqueued alarm = 30
+set hook job_enqueued order = 10
+set hook job_enqueued debug = false
+set hook job_enqueued fail_action = none
+
+import hook job_enqueued application/x-python default /root/openpbs.hooks/hook_job_enqueued.py
+
+# IMPORTANT:
+# Add nthreads, smt and npus_per_core to the scheduler's resources list in
+# $PBS_HOME/sched_priv/sched_config, then HUP/restart the scheduler as required
+# by the site's normal configuration procedure.
+
