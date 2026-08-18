@@ -5,11 +5,11 @@ OpenPBS job hook: cgroup v2 CPU and memory management.
 Design goals
 ------------
 * cgroup v2 only.
-* resources_available.ncpus is published by hook_discovery_node and is
+* resources_available.ncpus is published by hook_discovery_cpus and is
   the number of PHYSICAL cores.
 * A normal ncpus=N allocation reserves N whole physical cores and exposes
   one logical CPU from each selected core.
-* If the job requests ``hyperthreading=true``, all online SMT siblings of
+* If the job requests ``smt=true``, all online SMT siblings of
   each selected physical core are added to the cpuset.  Hybrid/mixed cores are
   allowed, so the resulting number of logical CPUs is topology-dependent.
 * resources_used.nthreads reports the actual number of logical CPUs in the
@@ -24,9 +24,9 @@ Design goals
 
 Required PBS resource definition
 --------------------------------
-    create resource hyperthreading
-    set resource hyperthreading type = boolean
-    set resource hyperthreading flag = h
+    create resource smt
+    set resource smt type = boolean
+    set resource smt flag = h
 
 Systemd/cgroup requirement
 --------------------------
@@ -291,52 +291,35 @@ def validate_local_vnode_cgroups(job):
             )
 
 
-def requested_hyperthreading(job):
+def requested_smt(job):
     """
-    Return the job-wide hyperthreading request from schedselect.
+    Return the job-wide SMT request from schedselect.
 
-    If hyperthreading is specified in multiple chunks, all explicit values
-    must agree.  Contradictory requests are rejected.
+    Cross-chunk consistency is validated by hook_job_enqueued at queue time.
+    This execution-side parser is deliberately tolerant for already queued or
+    otherwise legacy jobs: SMT is enabled if at least one chunk explicitly
+    requests smt=true.
     """
-
     try:
         select = job.schedselect
         if select is None:
             return False
-
         select = str(select)
-
     except Exception as exc:
         log(pbs.EVENT_DEBUG,
             "job %s: cannot read schedselect: %s" %
             (job.id, exc))
         return False
 
-    values = set()
-
     for chunk in select.split("+"):
-        chunk_value = None
-
         for part in chunk.split(":"):
             if "=" not in part:
                 continue
-
             key, value = part.split("=", 1)
+            if key.strip().lower() == "smt" and resource_truth(value):
+                return True
 
-            if key.strip().lower() == "hyperthreading":
-                chunk_value = resource_truth(value)
-                break
-
-        if chunk_value is not None:
-            values.add(chunk_value)
-
-    if len(values) > 1:
-        raise RuntimeError(
-            "contradictory hyperthreading requests in schedselect: %s" %
-            select
-        )
-
-    return True in values
+    return False
 
 def local_job_resources(job):
     """Return resources assigned by exec_vnode and select to this MoM."""
@@ -374,7 +357,7 @@ def local_job_resources(job):
         except Exception:
             pass
 
-    result["hyperthreading"] = requested_hyperthreading(job)
+    result["smt"] = requested_smt(job)
 
     return result
 
@@ -733,7 +716,7 @@ class CpuCgroupHook(object):
         return CpuTopology()
 
     def startup(self, e):
-        # Resource publication belongs to hook_discovery_node.  This startup
+        # Resource publication belongs to hook_discovery_cpus.  This startup
         # event only verifies/initializes the delegated cgroup-v2 hierarchy.
         self.cg.setup_hierarchy()
         log(pbs.EVENT_DEBUG, "cgroup v2 hierarchy initialized")
@@ -763,14 +746,14 @@ class CpuCgroupHook(object):
 
         self.cg.setup_hierarchy()
         topo = self.topology()
-        ht = resource_truth(resc.get("hyperthreading", False))
+        smt = resource_truth(resc.get("smt", False))
 
         with FileLock(self.cg.lock_file):
             reserved = self._reserved_core_keys(exclude_jobid=job.id)
             selected = topo.select(ncpus, reserved, self.cfg.get("placement", "packed"))
             cpus = []
             for core in selected:
-                if ht:
+                if smt:
                     cpus.extend(core["threads"])
                 else:
                     cpus.append(core["primary"])
@@ -789,7 +772,7 @@ class CpuCgroupHook(object):
                 "jobid": str(job.id),
                 "created": time.time(),
                 "ncpus": ncpus,
-                "hyperthreading": ht,
+                "smt": smt,
                 "core_keys": [c["key"] for c in selected],
                 "cpus": sorted(set(cpus)),
                 "nthreads": len(set(cpus)),
@@ -803,8 +786,8 @@ class CpuCgroupHook(object):
 
         self.update_usage(job.id, job.resources_used, force=True)
         log(pbs.EVENT_DEBUG,
-            "job %s: ncpus=%d physical cores, nthreads=%d, cpuset=%s, hyperthreading=%s" %
-            (job.id, ncpus, len(set(cpus)), format_cpu_list(cpus), ht))
+            "job %s: ncpus=%d physical cores, nthreads=%d, cpuset=%s, smt=%s" %
+            (job.id, ncpus, len(set(cpus)), format_cpu_list(cpus), smt))
         return True
 
     def launch(self, e):
@@ -826,7 +809,7 @@ class CpuCgroupHook(object):
         except Exception:
             pass
         try:
-            resources_used["hyperthreading"] = bool(state.get("hyperthreading", False))
+            resources_used["smt"] = bool(state.get("smt", False))
         except Exception:
             pass
 
