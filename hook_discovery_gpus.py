@@ -182,7 +182,8 @@ class NvidiaDiscovery(object):
                 # cannot be discovered on the current driver.
                 vnode.resources_available[key] = resources[key] or None
             vnode.resources_available["gpu_mem"] = (
-                "%dkb" % resources["gpu_mem"] if resources["gpu_mem"] is not None else None
+                pbs.size("%dkb" % resources["gpu_mem"])
+                if resources["gpu_mem"] is not None else None
             )
             updated = True
         if not updated:
