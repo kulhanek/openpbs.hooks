@@ -1,12 +1,15 @@
-#
 # ---------------------------------------------------------------------------
 # Per-job NVIDIA GPU allocation/isolation and nvidia-smi accounting
 # ---------------------------------------------------------------------------
+
 #
 # job_cgroups_v2 uses order 10.  Hooks run in ascending order, so order 20
 # makes job_gpus run after the cgroup hook; execjob_begin can therefore attach
 # its BPF_CGROUP_DEVICE program to the already-created job cgroup.
 #
+
+# resources --------------------------------------
+
 create resource gpupercent
 set resource gpupercent type = long
 set resource gpupercent flag = r
@@ -14,6 +17,16 @@ set resource gpupercent flag = r
 create resource gpumemmaxpercent
 set resource gpumemmaxpercent type = long
 set resource gpumemmaxpercent flag = r
+
+create resource gpupowerusageavg
+set resource gpupowerusageavg type = long
+set resource gpupowerusageavg flag = r
+
+create resource gpuenergyconsumed
+set resource gpuenergyconsumed type = long
+set resource gpuenergyconsumed flag = r
+
+# hook -------------------------------------------
 
 create hook job_gpus
 set hook job_gpus type = site

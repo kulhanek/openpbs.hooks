@@ -1,9 +1,9 @@
-
-#
 # ---------------------------------------------------------------------------
 # Per-job cgroup v2 CPU/memory management
 # ---------------------------------------------------------------------------
-#
+
+# hook -------------------------------------------
+
 create hook job_cgroups_v2
 set hook job_cgroups_v2 type = site
 set hook job_cgroups_v2 enabled = true
