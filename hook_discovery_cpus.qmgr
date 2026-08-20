@@ -20,6 +20,10 @@ create resource spec
 set resource spec type = float
 set resource spec flag = h
 
+create resource cpu_isa
+set resource cpu_isa type = string_array
+set resource cpu_isa flag = h
+
 # CPU resources --------------------
 
 create resource nthreads

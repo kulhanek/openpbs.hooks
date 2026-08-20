@@ -14,6 +14,7 @@ Published vnode resources
 * cpu_model      : CPU model name(s)
 * cpu_vendor     : native CPU vendor, optionally translated through cpu_vendor_map
 * cpu_flag       : CPU flags common to all online logical CPUs
+* cpu_isa        : cumulative x86-64 psABI feature levels supported by the node
 * spec           : relative speed of one CPU core, derived from cpu_model
 
 CPU topology is derived from Linux sysfs, CPU metadata from /proc/cpuinfo,
@@ -32,6 +33,7 @@ Suggested custom PBS resources
     cpu_model      : string_array (or string on homogeneous nodes)
     cpu_vendor     : string_array (or string on homogeneous nodes)
     cpu_flag       : string_array
+    cpu_isa        : string_array
     spec           : float
 
 The standard resources ncpus, mem, and vmem already exist in OpenPBS.
@@ -56,6 +58,58 @@ DEFAULT_CONFIG = {
 }
 
 _SIZE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?)(?:i?b)?\s*$", re.I)
+
+
+# Linux /proc/cpuinfo flag names corresponding to the incremental x86-64
+# psABI microarchitecture feature levels.
+#
+# x86-64-v1 is the x86-64 baseline and is inferred from the machine
+# architecture.  For v3, Linux exposes LZCNT as "abm".  The psABI OSXSAVE
+# requirement is represented here by "xsave" together with "avx": Linux only
+# exposes AVX to userspace when the required XSAVE/XCR0 state is enabled.
+_X86_64_ISA_LEVEL_FLAGS = (
+    (
+        "x86-64-v2",
+        frozenset(("cx16", "lahf_lm", "popcnt", "pni", "sse4_1", "sse4_2", "ssse3")),
+    ),
+    (
+        "x86-64-v3",
+        frozenset(("avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "abm", "movbe", "xsave")),
+    ),
+    (
+        "x86-64-v4",
+        frozenset(("avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl")),
+    ),
+)
+
+
+def detect_x86_64_isa(common_flags):
+    """
+    Return cumulative x86-64 psABI microarchitecture feature levels.
+
+    The result is suitable for a PBS string_array resource.  For example,
+    a v3-capable node publishes:
+        x86-64-v1,x86-64-v2,x86-64-v3
+
+    Non-x86-64 systems return an empty string.
+    """
+    machine = str(os.uname().machine or "").lower()
+    if machine not in ("x86_64", "amd64"):
+        return ""
+
+    flags = set(str(flag).strip().lower() for flag in common_flags if str(flag).strip())
+    levels = ["x86-64-v1"]
+
+    for level, required in _X86_64_ISA_LEVEL_FLAGS:
+        if required.issubset(flags):
+            levels.append(level)
+        else:
+            # Levels are cumulative.  If one level is not supported, higher
+            # levels must not be advertised even if their incremental flags
+            # happen to be present.
+            break
+
+    return join_resource_values(levels)
 
 
 def log(level, msg):
@@ -353,6 +407,7 @@ class NodeDiscovery(object):
             "cpu_model": join_resource_values(models),
             "cpu_vendor": join_resource_values(vendors),
             "cpu_flag": join_resource_values(common_flags),
+            "cpu_isa": detect_x86_64_isa(common_flags),
         }
 
     def discover(self):
@@ -389,7 +444,7 @@ class NodeDiscovery(object):
             for key, value in resources.items():
                 if key == "vmem" and not self.cfg.get("publish_vmem", True):
                     continue
-                if value == "" and key != "cpu_flag":
+                if value == "" and key not in ("cpu_flag", "cpu_isa"):
                     continue
                 vnode.resources_available[key] = value
             updated = True
@@ -399,7 +454,7 @@ class NodeDiscovery(object):
 
         log(
             pbs.EVENT_DEBUG,
-            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s spec=%s"
+            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s cpu_isa=%s spec=%s"
             % (
                 resources["ncpus"],
                 resources["nthreads"],
@@ -409,6 +464,7 @@ class NodeDiscovery(object):
                 resources["mem"],
                 " vmem=%s" % resources["vmem"] if self.cfg.get("publish_vmem", True) else "",
                 resources.get("cpu_vendor", ""),
+                resources.get("cpu_isa", ""),
                 resources.get("spec", ""),
             ),
         )
