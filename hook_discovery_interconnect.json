@@ -1,0 +1,14 @@
+{
+    "exclude_interfaces": [
+        "lo",
+        "docker*",
+        "veth*",
+        "virbr*",
+        "br-*",
+        "tun*",
+        "tap*"
+    ],
+    "exclude_rdma_devices": [],
+    "require_interface_up": true,
+    "require_rdma_active": true
+}

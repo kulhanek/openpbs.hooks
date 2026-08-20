@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# discovery interconnect
+# ---------------------------------------------------------------------------
+
+# resources --------------------------------------
+
+create resource interconnect
+set interconnect type = string_array
+set interconnect flag = h
+
+create resource interconnect_speed
+set interconnect_speed type = long
+set interconnect_speed flag = h
+
+create resource rdma
+set rdma os type = boolean
+set rdma os flag = h
+
+create resource eth_speed
+set eth_speed type = long
+set eth_speed flag = h
+
+create resource ib_speed
+set ib_speed type = long
+set ib_speed flag = h
+
+# hook -------------------------------------------
+
+create hook discovery_interconnect
+set hook discovery_interconnect type = site
+set hook discovery_interconnect enabled = true
+set hook discovery_interconnect event = exechost_startup
+set hook discovery_interconnect event += exechost_periodic
+set hook discovery_interconnect user = pbsadmin
+set hook discovery_interconnect alarm = 30
+set hook discovery_interconnect freq = 4000
+set hook discovery_interconnect order = 40
+set hook discovery_interconnect debug = false
+set hook discovery_interconnect fail_action = none
+
+import hook discovery_interconnect application/x-python default /root/openpbs.hooks/hook_discovery_interconnect.py
+import hook discovery_interconnect application/json default /root/openpbs.hooks/hook_discovery_interconnect.json
