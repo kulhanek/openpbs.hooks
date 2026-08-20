@@ -1,4 +1,7 @@
-# GPU specification --------------------
+# ---------------------------------------------------------------------------
+# discovery GPUs
+# ---------------------------------------------------------------------------
+
 create resource ngpus
 set resource ngpus type = long
 set resource ngpus flag = hn
@@ -19,11 +22,8 @@ create resource gpu_mem
 set resource gpu_mem type = size
 set resource gpu_mem flag = h
 
-#
-# ---------------------------------------------------------------------------
-# GPUs discovery
-# ---------------------------------------------------------------------------
-#
+# hook -------------------------------------------
+
 create hook discovery_gpus
 set hook discovery_gpus type = site
 set hook discovery_gpus enabled = true
@@ -31,8 +31,8 @@ set hook discovery_gpus event = exechost_startup
 set hook discovery_gpus event += exechost_periodic
 set hook discovery_gpus user = pbsadmin
 set hook discovery_gpus alarm = 30
-set hook discovery_gpus freq = 30
-set hook discovery_gpus order = 5
+set hook discovery_gpus freq = 1800
+set hook discovery_gpus order = 30
 set hook discovery_gpus debug = false
 set hook discovery_gpus fail_action = none
 

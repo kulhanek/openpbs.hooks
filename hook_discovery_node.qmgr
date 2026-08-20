@@ -1,4 +1,9 @@
-# node specification --------------------
+# ---------------------------------------------------------------------------
+# discovery node
+# ---------------------------------------------------------------------------
+
+# resources --------------------------------------
+
 create resource os
 set resource os type = string
 set resource os flag = h
@@ -15,11 +20,8 @@ create resource pbs_server
 set resource pbs_server type = string
 set resource pbs_server flag = h
 
-#
-# ---------------------------------------------------------------------------
-# node discovery
-# ---------------------------------------------------------------------------
-#
+# hook -------------------------------------------
+
 create hook discovery_node
 set hook discovery_node type = site
 set hook discovery_node enabled = true
@@ -27,8 +29,8 @@ set hook discovery_node event = exechost_startup
 set hook discovery_node event += exechost_periodic
 set hook discovery_node user = pbsadmin
 set hook discovery_node alarm = 30
-set hook discovery_node freq = 3600
-set hook discovery_node order = 5
+set hook discovery_node freq = 8000
+set hook discovery_node order = 10
 set hook discovery_node debug = false
 set hook discovery_node fail_action = none
 

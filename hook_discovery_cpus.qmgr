@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# CPUs+memory discovery
+# discovery CPUs and memory
 # ---------------------------------------------------------------------------
 
 # CPU specification --------------------
@@ -38,9 +38,8 @@ create resource npus_per_core
 set resource npus_per_core type = string
 set resource npus_per_core flag = h
 
-# ---------------------------------------------------------------------------
-# CPUs+memory discovery
-# ---------------------------------------------------------------------------
+# hook -------------------------------------------
+
 create hook discovery_cpus
 set hook discovery_cpus type = site
 set hook discovery_cpus enabled = true
@@ -49,7 +48,7 @@ set hook discovery_cpus event += exechost_periodic
 set hook discovery_cpus user = pbsadmin
 set hook discovery_cpus alarm = 30
 set hook discovery_cpus freq = 3600
-set hook discovery_cpus order = 5
+set hook discovery_cpus order = 20
 set hook discovery_cpus debug = false
 set hook discovery_cpus fail_action = none
 
