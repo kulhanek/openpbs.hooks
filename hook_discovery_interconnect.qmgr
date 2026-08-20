@@ -13,8 +13,8 @@ set resource interconnect_speed type = long
 set resource interconnect_speed flag = h
 
 create resource rdma
-set resource rdma os type = boolean
-set resource rdma os flag = h
+set resource rdma type = boolean
+set resource rdma flag = h
 
 create resource eth_speed
 set resource eth_speed type = long
