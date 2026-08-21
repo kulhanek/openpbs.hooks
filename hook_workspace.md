@@ -84,8 +84,6 @@ For a requested workspace the hook sets:
 |---|---|
 | `SCRATCHDIR` | Job workspace path. |
 | `SCRATCH` | Alias of `SCRATCHDIR`. |
-| `SINGULARITY_TMPDIR` | Set to the workspace path. |
-| `SINGULARITY_CACHEDIR` | Set to the workspace path. |
 | `SCRATCH_RESOURCE` | Top-level requested resource: `scratch_local`, `scratch_shared`, `scratch_shm`, or `none`. |
 | `SCRATCH_TYPE` | `local`, `shared`, `shm`, or `none`. |
 | `SCRATCH_SUBTYPE` | Persistently selected backend subtype, e.g. `nvme`, `nfs`, or `tmpfs`. |

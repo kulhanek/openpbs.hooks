@@ -906,7 +906,7 @@ def remove_dir(path, preserve_nonempty):
 
 def set_env(job, path, requested_resource, subtype, local_size, total_size, cfg):
     variables = job.Variable_List
-    for key in ("SCRATCHDIR", "SCRATCH", "SINGULARITY_TMPDIR", "SINGULARITY_CACHEDIR"):
+    for key in ("SCRATCHDIR", "SCRATCH"):
         variables[key] = path
 
     variables["SCRATCH_VOLUME"] = int(local_size)
