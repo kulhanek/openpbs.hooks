@@ -2,6 +2,8 @@
 # discovery GPUs
 # ---------------------------------------------------------------------------
 
+# resources --------------------------------------
+
 create resource ngpus
 set resource ngpus type = long
 set resource ngpus flag = hn
