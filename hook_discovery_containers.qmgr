@@ -1,9 +1,18 @@
-# Resource used to advertise container runtimes available on execution hosts.
-create resource containers type=string_array flags=h
+# ---------------------------------------------------------------------------
+# discovery container runtimes
+# ---------------------------------------------------------------------------
 
-# Execution-host discovery hook.
+# resources --------------------------------------
+
+create resource containers
+set resource containers type=string_array
+set resource containers flags=h
+
+# hook -------------------------------------------
+
 create hook hook_discovery_containers
-set hook hook_discovery_containers event = exechost_startup,exechost_periodic
+set hook hook_discovery_containers event = exechost_startup
+set hook hook_discovery_containers event += exechost_periodic
 set hook hook_discovery_containers enabled = true
 set hook hook_discovery_containers alarm = 30
 set hook hook_discovery_containers freq = 3600
