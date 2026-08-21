@@ -6,17 +6,19 @@ For each configured collection, the hook reads one resources_available
 resource from every vnode, creates a sorted unique union of all values, and
 publishes the result as a server resources_available string_array.
 
-Important OpenPBS detail:
-    pbs.server() returns a read-only server object in a periodic hook.
-    Therefore server resources cannot be changed by assigning to
-    pbs.server().resources_available.  When an aggregate changes, this hook
-    performs one local qmgr SET/UNSET operation instead.
+OpenPBS details:
+- pbs.server() is read-only in a periodic hook, so server updates are performed
+  through the local qmgr command.
+- Existing target values are read without deduplication so stale duplicates can
+  be detected and repaired.
+- Changed targets are replaced using UNSET followed by SET.  This avoids qmgr
+  string_array merge semantics and guarantees a canonical sorted unique value.
 
-Only string and string_array source values are considered.  Unsupported source
+Only string and string_array source values are considered. Unsupported source
 types are silently skipped.
 
-The target is changed only when its normalized value differs from the newly
-collected value.
+No server update is performed when the current target is already exactly equal
+to the desired canonical list.
 """
 
 import json
@@ -47,12 +49,6 @@ def load_config():
 
 
 def read_pbs_exec():
-    """
-    Determine PBS_EXEC without assuming a particular installation prefix.
-
-    Prefer the environment if PBS supplies it.  Otherwise read PBS_CONF_FILE
-    (or /etc/pbs.conf) and obtain PBS_EXEC from there.
-    """
     value = os.environ.get("PBS_EXEC")
     if value:
         return value
@@ -78,18 +74,10 @@ def read_pbs_exec():
 
 
 def get_qmgr_path(config):
-    """
-    Return an absolute qmgr path.
-
-    An explicit JSON "qmgr" entry takes precedence.  Otherwise qmgr is derived
-    from PBS_EXEC.
-    """
     qmgr = config.get("qmgr")
 
     if isinstance(qmgr, str) and qmgr:
-        if os.path.isabs(qmgr):
-            return qmgr
-        return None
+        return qmgr if os.path.isabs(qmgr) else None
 
     pbs_exec = read_pbs_exec()
     if not pbs_exec:
@@ -100,11 +88,11 @@ def get_qmgr_path(config):
 
 def string_values(value):
     """
-    Convert a PBS string or string_array source value to a list of strings.
+    Convert a PBS string or string_array value to a list of strings.
 
     Return:
         list  - valid string/string_array value
-        None  - unsupported resource type
+        None  - unsupported type
     """
     if value is None:
         return []
@@ -113,7 +101,6 @@ def string_values(value):
         text = value.strip()
         return [text] if text else []
 
-    # PBS string_array resources are exposed as list-like values.
     if isinstance(value, (list, tuple)):
         result = []
         for item in value:
@@ -148,31 +135,35 @@ def get_resource(resources, name):
         return None
 
 
-def normalize_target(value):
+def normalize_existing_target(value):
     """
-    Normalize the current server target into a sorted unique list.
+    Normalize representation/order of an existing target WITHOUT deduplication.
+
+    Keeping duplicates is intentional.  It allows:
+        old = [a, b, b]
+        new = [a, b]
+    to be recognized as different so the hook repairs the stale duplicate.
     """
     if value is None:
         return []
 
     if isinstance(value, str):
-        return sorted(set(
-            item.strip() for item in value.split(",") if item.strip()
-        ))
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        return sorted(items)
 
     values = string_values(value)
     if values is None:
         return None
 
-    return sorted(set(values))
+    return sorted(values)
 
 
 def collect_from_vnodes(vnode_list, source):
     """
-    Return the sorted unique union of source over all vnodes.
+    Return sorted unique source values from all vnodes.
 
-    Unset values are ignored.  If a defined value has an unsupported type,
-    the entire collection is silently skipped.
+    Any defined non-string/non-string_array source causes the collection to be
+    silently skipped.
     """
     values = set()
 
@@ -189,12 +180,6 @@ def collect_from_vnodes(vnode_list, source):
 
 
 def qmgr_quote(value):
-    """
-    Quote a qmgr string value.
-
-    qmgr receives the command directly (shell=False), so this protects only
-    qmgr's own command parser, not a shell.
-    """
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -222,18 +207,23 @@ def run_qmgr(qmgr, command):
 
 def update_target(qmgr, source, target, old_values, new_values):
     """
-    Update or clear one server target with qmgr.
+    Canonically replace one target.
+
+    UNSET first to remove all previous members, then SET the complete new
+    string_array value.  This also repairs stale duplicate entries.
     """
+    run_qmgr(
+        qmgr,
+        "unset server resources_available.%s" % target
+    )
+
     if new_values:
         value = ",".join(new_values)
-        command = (
+        run_qmgr(
+            qmgr,
             "set server resources_available.%s = %s"
             % (target, qmgr_quote(value))
         )
-    else:
-        command = "unset server resources_available.%s" % target
-
-    run_qmgr(qmgr, command)
 
     log(
         pbs.EVENT_DEBUG,
@@ -251,7 +241,7 @@ def update_target(qmgr, source, target, old_values, new_values):
 def run(config):
     event = pbs.event()
     vnode_list = event.vnode_list
-    server = pbs.server()  # read-only; used only for reading current targets
+    server = pbs.server()  # read-only, used only for current target values
 
     collections = config.get("collections", [])
     if not isinstance(collections, list):
@@ -277,17 +267,18 @@ def run(config):
 
         new_values = collect_from_vnodes(vnode_list, source)
 
-        # Unsupported source type: deliberately silent and leave target alone.
+        # Unsupported source type: deliberately silent.
         if new_values is None:
             continue
 
         old_raw = get_resource(server.resources_available, target)
-        old_values = normalize_target(old_raw)
+        old_values = normalize_existing_target(old_raw)
 
-        # A wrongly typed target is also left untouched.
+        # Wrongly typed target: silently leave untouched.
         if old_values is None:
             continue
 
+        # Important: old_values preserves duplicates, new_values does not.
         if old_values == new_values:
             continue
 

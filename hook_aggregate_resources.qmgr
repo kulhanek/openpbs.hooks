@@ -1,19 +1,9 @@
 # ---------------------------------------------------------------------------
-# aggregate resources
+# hook_aggregate_resources
 # ---------------------------------------------------------------------------
 
-# Server-wide aggregate resources.
-#
-# No resource flags are set deliberately: these values describe the PBS
-# complex as a whole and are not vnode/chunk selection resources.
-
-create resource all_gpu_caps
-set resource all_gpu_caps type = string_array
-
-create resource all_cpu_isas
-set resource all_cpu_isas type = string_array
-
-# hook -------------------------------------------
+create resource all_gpu_caps type=string_array
+create resource all_cpu_isas type=string_array
 
 create hook aggregate_resources
 set hook aggregate_resources type = site
