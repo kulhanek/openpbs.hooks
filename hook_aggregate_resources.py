@@ -6,19 +6,19 @@ For each configured collection, the hook reads one resources_available
 resource from every vnode, creates a sorted unique union of all values, and
 publishes the result as a server resources_available string_array.
 
-OpenPBS details:
-- pbs.server() is read-only in a periodic hook, so server updates are performed
-  through the local qmgr command.
-- Existing target values are read without deduplication so stale duplicates can
-  be detected and repaired.
-- Changed targets are replaced using UNSET followed by SET.  This avoids qmgr
-  string_array merge semantics and guarantees a canonical sorted unique value.
+Important implementation details:
+- pbs.server() is read-only in a periodic hook, therefore changed server
+  resources are written through the local qmgr executable.
+- PBS may expose string_array members as PBS-specific string-like wrapper
+  objects.  Every member is explicitly converted to a plain Python str before
+  deduplication.  This is required because two wrapper objects may display the
+  same text while not comparing/hashing identically.
+- Existing target values preserve duplicates during comparison so stale
+  duplicates can be detected and repaired.
+- Changed targets are replaced using UNSET followed by SET.
 
-Only string and string_array source values are considered. Unsupported source
-types are silently skipped.
-
-No server update is performed when the current target is already exactly equal
-to the desired canonical list.
+Only string and string_array sources are considered. Unsupported source types
+are silently skipped.
 """
 
 import json
@@ -86,9 +86,19 @@ def get_qmgr_path(config):
     return os.path.join(pbs_exec, "bin", "qmgr")
 
 
+def plain_string(value):
+    """
+    Return a normalized plain Python str.
+
+    str(...) is intentional even for str-like PBS wrapper objects.
+    """
+    text = str(value).strip()
+    return text if text else None
+
+
 def string_values(value):
     """
-    Convert a PBS string or string_array value to a list of strings.
+    Convert a PBS string or string_array value to a list of *plain Python str*.
 
     Return:
         list  - valid string/string_array value
@@ -98,7 +108,7 @@ def string_values(value):
         return []
 
     if isinstance(value, str):
-        text = value.strip()
+        text = plain_string(value)
         return [text] if text else []
 
     if isinstance(value, (list, tuple)):
@@ -106,7 +116,7 @@ def string_values(value):
         for item in value:
             if not isinstance(item, str):
                 return None
-            text = item.strip()
+            text = plain_string(item)
             if text:
                 result.append(text)
         return result
@@ -116,12 +126,11 @@ def string_values(value):
         result = []
         try:
             for item in value:
-                if not isinstance(item, str):
-                    return None
-                text = item.strip()
+                # PBS may return a string-like wrapper rather than exact str.
+                text = plain_string(item)
                 if text:
                     result.append(text)
-        except TypeError:
+        except (TypeError, ValueError):
             return None
         return result
 
@@ -137,19 +146,19 @@ def get_resource(resources, name):
 
 def normalize_existing_target(value):
     """
-    Normalize representation/order of an existing target WITHOUT deduplication.
+    Normalize existing target WITHOUT deduplication.
 
-    Keeping duplicates is intentional.  It allows:
-        old = [a, b, b]
-        new = [a, b]
-    to be recognized as different so the hook repairs the stale duplicate.
+    Duplicates must remain visible so malformed server arrays are repaired.
     """
     if value is None:
         return []
 
     if isinstance(value, str):
-        items = [item.strip() for item in value.split(",") if item.strip()]
-        return sorted(items)
+        return sorted(
+            plain_string(item)
+            for item in str(value).split(",")
+            if plain_string(item)
+        )
 
     values = string_values(value)
     if values is None:
@@ -160,10 +169,11 @@ def normalize_existing_target(value):
 
 def collect_from_vnodes(vnode_list, source):
     """
-    Return sorted unique source values from all vnodes.
+    Return a canonical sorted unique list of source values from all vnodes.
 
-    Any defined non-string/non-string_array source causes the collection to be
-    silently skipped.
+    Values are converted to plain Python str before entering the set.
+    A second dict-based canonicalization pass is retained deliberately as a
+    defensive guard against unusual PBS wrapper behaviour.
     """
     values = set()
 
@@ -174,9 +184,20 @@ def collect_from_vnodes(vnode_list, source):
         if parts is None:
             return None
 
-        values.update(parts)
+        for item in parts:
+            # Explicit plain-str conversion before hashing/equality.
+            text = plain_string(item)
+            if text:
+                values.add(text)
 
-    return sorted(values)
+    # Defensive second canonicalization by textual key.
+    canonical = {}
+    for item in values:
+        text = plain_string(item)
+        if text:
+            canonical[text] = text
+
+    return sorted(canonical.keys())
 
 
 def qmgr_quote(value):
@@ -206,12 +227,6 @@ def run_qmgr(qmgr, command):
 
 
 def update_target(qmgr, source, target, old_values, new_values):
-    """
-    Canonically replace one target.
-
-    UNSET first to remove all previous members, then SET the complete new
-    string_array value.  This also repairs stale duplicate entries.
-    """
     run_qmgr(
         qmgr,
         "unset server resources_available.%s" % target
@@ -241,7 +256,7 @@ def update_target(qmgr, source, target, old_values, new_values):
 def run(config):
     event = pbs.event()
     vnode_list = event.vnode_list
-    server = pbs.server()  # read-only, used only for current target values
+    server = pbs.server()
 
     collections = config.get("collections", [])
     if not isinstance(collections, list):
@@ -267,18 +282,15 @@ def run(config):
 
         new_values = collect_from_vnodes(vnode_list, source)
 
-        # Unsupported source type: deliberately silent.
         if new_values is None:
             continue
 
         old_raw = get_resource(server.resources_available, target)
         old_values = normalize_existing_target(old_raw)
 
-        # Wrongly typed target: silently leave untouched.
         if old_values is None:
             continue
 
-        # Important: old_values preserves duplicates, new_values does not.
         if old_values == new_values:
             continue
 
