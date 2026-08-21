@@ -1,0 +1,12 @@
+{
+    "collections": [
+        {
+            "source": "gpu_cap",
+            "target": "all_gpu_caps"
+        },
+        {
+            "source": "cpu_isa",
+            "target": "all_cpu_isas"
+        }
+    ]
+}
