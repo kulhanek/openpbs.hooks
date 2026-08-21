@@ -14,8 +14,8 @@ Published vnode resources
 * cpu_model      : CPU model name(s)
 * cpu_vendor     : native CPU vendor, optionally translated through cpu_vendor_map
 * cpu_flag       : CPU flags common to all online logical CPUs
-* cpu_isa        : cumulative x86-64 psABI feature levels supported by the node
-* spec           : relative speed of one CPU core, derived from cpu_model
+* cpu_isa        : highest x86-64 psABI feature level supported by the node
+* cpu_spec       : relative speed of one CPU core, derived from cpu_model
 
 CPU topology is derived from Linux sysfs, CPU metadata from /proc/cpuinfo,
 and memory from /proc/meminfo.
@@ -34,7 +34,7 @@ Suggested custom PBS resources
     cpu_vendor     : string_array (or string on homogeneous nodes)
     cpu_flag       : string_array
     cpu_isa        : string_array
-    spec           : float
+    cpu_spec       : float
 
 The standard resources ncpus, mem, and vmem already exist in OpenPBS.
 """
@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     "memory_reserve": "0B",
     "publish_vmem": True,
     "cpu_vendor_map": [],
-    "default_spec": 0.0,
+    "default_cpu_spec": 0.0,
     "cpu_spec_map": [],
 }
 
@@ -85,11 +85,11 @@ _X86_64_ISA_LEVEL_FLAGS = (
 
 def detect_x86_64_isa(common_flags):
     """
-    Return cumulative x86-64 psABI microarchitecture feature levels.
+    Return the highest supported x86-64 psABI microarchitecture feature level.
 
-    The result is suitable for a PBS string_array resource.  For example,
-    a v3-capable node publishes:
-        x86-64-v1,x86-64-v2,x86-64-v3
+    The result is suitable for a PBS string_array resource containing exactly
+    one value.  For example, a v3-capable node publishes:
+        x86-64-v3
 
     Non-x86-64 systems return an empty string.
     """
@@ -98,18 +98,20 @@ def detect_x86_64_isa(common_flags):
         return ""
 
     flags = set(str(flag).strip().lower() for flag in common_flags if str(flag).strip())
-    levels = ["x86-64-v1"]
+    highest = "x86-64-v1"
 
     for level, required in _X86_64_ISA_LEVEL_FLAGS:
         if required.issubset(flags):
-            levels.append(level)
+            highest = level
         else:
             # Levels are cumulative.  If one level is not supported, higher
             # levels must not be advertised even if their incremental flags
             # happen to be present.
             break
 
-    return join_resource_values(levels)
+    # cpu_isa remains a PBS string_array resource, but only the highest
+    # supported ISA level is published.
+    return highest
 
 
 def log(level, msg):
@@ -237,7 +239,7 @@ def map_cpu_vendor(vendor, vendor_map):
     return native
 
 
-def map_cpu_spec(cpu_model, spec_map, default_spec):
+def map_cpu_spec(cpu_model, cpu_spec_map, default_cpu_spec):
     """
     Return the floating-point CPU-core performance value for cpu_model.
 
@@ -246,13 +248,13 @@ def map_cpu_spec(cpu_model, spec_map, default_spec):
     Supported entry fields:
         pattern : shell-style wildcard pattern matched against cpu_model
         cs      : case-sensitive matching when true; default false
-        value   : floating-point value published in spec
+        value   : floating-point value published in cpu_spec
 
-    If no entry matches, default_spec is returned.
+    If no entry matches, default_cpu_spec is returned.
     """
     model = str(cpu_model or "").strip()
 
-    for entry in spec_map or []:
+    for entry in cpu_spec_map or []:
         if not isinstance(entry, dict):
             continue
 
@@ -269,7 +271,7 @@ def map_cpu_spec(cpu_model, spec_map, default_spec):
         if matched:
             return float(entry["value"])
 
-    return float(default_spec)
+    return float(default_cpu_spec)
 
 
 class CpuTopology(object):
@@ -423,10 +425,10 @@ class NodeDiscovery(object):
             "npus_per_core": topo.npus_per_core,
             "mem": bytes_to_pbs_size(mem),
             "vmem": bytes_to_pbs_size(vmem),
-            "spec": map_cpu_spec(
+            "cpu_spec": map_cpu_spec(
                 cpuinfo.get("cpu_model", ""),
                 self.cfg.get("cpu_spec_map", []),
-                self.cfg.get("default_spec", 0.0),
+                self.cfg.get("default_cpu_spec", 0.0),
             ),
         }
         result.update(cpuinfo)
@@ -454,7 +456,7 @@ class NodeDiscovery(object):
 
         log(
             pbs.EVENT_DEBUG,
-            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s cpu_isa=%s spec=%s"
+            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s cpu_isa=%s cpu_spec=%s"
             % (
                 resources["ncpus"],
                 resources["nthreads"],
@@ -465,7 +467,7 @@ class NodeDiscovery(object):
                 " vmem=%s" % resources["vmem"] if self.cfg.get("publish_vmem", True) else "",
                 resources.get("cpu_vendor", ""),
                 resources.get("cpu_isa", ""),
-                resources.get("spec", ""),
+                resources.get("cpu_spec", ""),
             ),
         )
 

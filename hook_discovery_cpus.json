@@ -13,7 +13,7 @@
             "alias": "intel"
         }
     ],
-    "default_spec": 30.0,
+    "default_cpu_spec": 30.0,
     "cpu_spec_map": [
         {
             "pattern": "*AMD EPYC 7402P*",

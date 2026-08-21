@@ -16,9 +16,9 @@ create resource cpu_flag
 set resource cpu_flag type = string_array
 set resource cpu_flag flag = h
 
-create resource spec
-set resource spec type = float
-set resource spec flag = h
+create resource cpu_spec
+set resource cpu_spec type = float
+set resource cpu_spec flag = hl
 
 create resource cpu_isa
 set resource cpu_isa type = string_array
