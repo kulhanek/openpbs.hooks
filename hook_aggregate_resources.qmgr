@@ -2,8 +2,8 @@
 # hook_aggregate_resources
 # ---------------------------------------------------------------------------
 
-create resource all_gpu_caps type=string_array
-create resource all_cpu_isas type=string_array
+# The hook does not create or update server resources.  It only writes the
+# configured generated JSON state file below PBS_HOME.
 
 create hook aggregate_resources
 set hook aggregate_resources type = site

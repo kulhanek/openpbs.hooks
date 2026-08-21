@@ -2,35 +2,27 @@
 """
 OpenPBS server-periodic hook for aggregating vnode string resources.
 
-For each configured collection, the hook reads one resources_available
-resource from every vnode, creates a sorted unique union of all values, and
-publishes the result as a server resources_available string_array.
+The hook collects configured vnode resources, builds sorted unique lists, and
+stores the result in a generated JSON state file under PBS_HOME.
 
-Important implementation details:
-- pbs.server() is read-only in a periodic hook, therefore changed server
-  resources are written through the local qmgr executable.
-- PBS may expose string_array members as PBS-specific string-like wrapper
-  objects.  Every member is explicitly converted to a plain Python str before
-  deduplication.  This is required because two wrapper objects may display the
-  same text while not comparing/hashing identically.
-- Existing target values preserve duplicates during comparison so stale
-  duplicates can be detected and repaired.
-- Changed targets are replaced using UNSET followed by SET.
+The output path is configured as a path relative to PBS_HOME.  The hook writes
+the file atomically and replaces it only when the aggregated resource content
+changes.
 
-Only string and string_array sources are considered. Unsupported source types
-are silently skipped.
+Only string and string_array source values are considered. Unsupported source
+types are silently skipped.
 """
 
 import json
 import os
-import re
-import subprocess
+import tempfile
+import time
 import traceback
 
 import pbs
 
 
-RESOURCE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_STATE_FILE = "server_priv/hooks/hook_data/aggregate_resources.json"
 
 
 def log(level, msg):
@@ -40,16 +32,31 @@ def log(level, msg):
 def load_config():
     path = os.environ.get("PBS_HOOK_CONFIG_FILE")
     if not path or not os.path.isfile(path):
-        return {"collections": []}
+        return {
+            "state_file": DEFAULT_STATE_FILE,
+            "collections": []
+        }
 
     with open(path, "r") as f:
         data = json.load(f)
 
-    return data if isinstance(data, dict) else {"collections": []}
+    if not isinstance(data, dict):
+        data = {}
+
+    if "state_file" not in data:
+        data["state_file"] = DEFAULT_STATE_FILE
+
+    if "collections" not in data:
+        data["collections"] = []
+
+    return data
 
 
-def read_pbs_exec():
-    value = os.environ.get("PBS_EXEC")
+def read_pbs_home():
+    """
+    Determine PBS_HOME from the environment or PBS configuration.
+    """
+    value = os.environ.get("PBS_HOME")
     if value:
         return value
 
@@ -63,7 +70,7 @@ def read_pbs_exec():
                     continue
 
                 key, value = line.split("=", 1)
-                if key.strip() == "PBS_EXEC":
+                if key.strip() == "PBS_HOME":
                     value = value.strip().strip('"').strip("'")
                     if value:
                         return value
@@ -73,24 +80,38 @@ def read_pbs_exec():
     return None
 
 
-def get_qmgr_path(config):
-    qmgr = config.get("qmgr")
+def resolve_state_path(config):
+    """
+    Resolve the configured state_file relative to PBS_HOME.
 
-    if isinstance(qmgr, str) and qmgr:
-        return qmgr if os.path.isabs(qmgr) else None
+    Absolute paths and paths escaping PBS_HOME are rejected.
+    """
+    relpath = config.get("state_file", DEFAULT_STATE_FILE)
 
-    pbs_exec = read_pbs_exec()
-    if not pbs_exec:
-        return None
+    if not isinstance(relpath, str) or not relpath.strip():
+        raise RuntimeError("state_file must be a non-empty relative path")
 
-    return os.path.join(pbs_exec, "bin", "qmgr")
+    relpath = relpath.strip()
+
+    if os.path.isabs(relpath):
+        raise RuntimeError("state_file must be relative to PBS_HOME")
+
+    pbs_home = read_pbs_home()
+    if not pbs_home:
+        raise RuntimeError("cannot determine PBS_HOME")
+
+    pbs_home = os.path.realpath(pbs_home)
+    path = os.path.realpath(os.path.join(pbs_home, relpath))
+
+    if path != pbs_home and not path.startswith(pbs_home + os.sep):
+        raise RuntimeError("state_file escapes PBS_HOME")
+
+    return path
 
 
 def plain_string(value):
     """
-    Return a normalized plain Python str.
-
-    str(...) is intentional even for str-like PBS wrapper objects.
+    Convert a PBS string-like object to a plain Python string.
     """
     text = str(value).strip()
     return text if text else None
@@ -98,11 +119,11 @@ def plain_string(value):
 
 def string_values(value):
     """
-    Convert a PBS string or string_array value to a list of *plain Python str*.
+    Convert a PBS string or string_array value to plain Python strings.
 
     Return:
         list  - valid string/string_array value
-        None  - unsupported type
+        None  - unsupported resource type
     """
     if value is None:
         return []
@@ -122,11 +143,11 @@ def string_values(value):
         return result
 
     typename = type(value).__name__.lower()
+
     if "string_array" in typename:
         result = []
         try:
             for item in value:
-                # PBS may return a string-like wrapper rather than exact str.
                 text = plain_string(item)
                 if text:
                     result.append(text)
@@ -144,36 +165,12 @@ def get_resource(resources, name):
         return None
 
 
-def normalize_existing_target(value):
+def collect_resource(vnode_list, source):
     """
-    Normalize existing target WITHOUT deduplication.
+    Return a canonical sorted unique list for one source resource.
 
-    Duplicates must remain visible so malformed server arrays are repaired.
-    """
-    if value is None:
-        return []
-
-    if isinstance(value, str):
-        return sorted(
-            plain_string(item)
-            for item in str(value).split(",")
-            if plain_string(item)
-        )
-
-    values = string_values(value)
-    if values is None:
-        return None
-
-    return sorted(values)
-
-
-def collect_from_vnodes(vnode_list, source):
-    """
-    Return a canonical sorted unique list of source values from all vnodes.
-
-    Values are converted to plain Python str before entering the set.
-    A second dict-based canonicalization pass is retained deliberately as a
-    defensive guard against unusual PBS wrapper behaviour.
+    If a defined source value has an unsupported type, return None and silently
+    skip this collection.
     """
     values = set()
 
@@ -185,122 +182,145 @@ def collect_from_vnodes(vnode_list, source):
             return None
 
         for item in parts:
-            # Explicit plain-str conversion before hashing/equality.
             text = plain_string(item)
             if text:
                 values.add(text)
 
-    # Defensive second canonicalization by textual key.
-    canonical = {}
-    for item in values:
-        text = plain_string(item)
-        if text:
-            canonical[text] = text
-
-    return sorted(canonical.keys())
+    return sorted(values)
 
 
-def qmgr_quote(value):
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+def build_resources(vnode_list, collections):
+    """
+    Build the complete resource mapping from configuration.
+    """
+    result = {}
 
-
-def run_qmgr(qmgr, command):
-    proc = subprocess.Popen(
-        [qmgr, "-c", command],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        close_fds=True
-    )
-
-    stdout, stderr = proc.communicate()
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "qmgr failed (rc=%d): %s%s"
-            % (
-                proc.returncode,
-                stderr.strip(),
-                ("; " + stdout.strip()) if stdout.strip() else ""
-            )
-        )
-
-
-def update_target(qmgr, source, target, old_values, new_values):
-    run_qmgr(
-        qmgr,
-        "unset server resources_available.%s" % target
-    )
-
-    if new_values:
-        value = ",".join(new_values)
-        run_qmgr(
-            qmgr,
-            "set server resources_available.%s = %s"
-            % (target, qmgr_quote(value))
-        )
-
-    log(
-        pbs.EVENT_DEBUG,
-        "updated server resources_available.%s from [%s] to [%s] "
-        "(source=%s)"
-        % (
-            target,
-            ",".join(old_values),
-            ",".join(new_values),
-            source
-        )
-    )
-
-
-def run(config):
-    event = pbs.event()
-    vnode_list = event.vnode_list
-    server = pbs.server()
-
-    collections = config.get("collections", [])
     if not isinstance(collections, list):
-        return
-
-    qmgr = get_qmgr_path(config)
-    if not qmgr or not os.path.isabs(qmgr) or not os.access(qmgr, os.X_OK):
-        raise RuntimeError("cannot locate executable qmgr using an absolute path")
+        return result
 
     for item in collections:
         if not isinstance(item, dict):
             continue
 
         source = item.get("source")
-        target = item.get("target")
 
-        if not isinstance(source, str) or not RESOURCE_NAME_RE.match(source):
-            continue
-        if not isinstance(target, str) or not RESOURCE_NAME_RE.match(target):
-            continue
-        if source == target:
+        if not isinstance(source, str):
             continue
 
-        new_values = collect_from_vnodes(vnode_list, source)
-
-        if new_values is None:
+        source = source.strip()
+        if not source:
             continue
 
-        old_raw = get_resource(server.resources_available, target)
-        old_values = normalize_existing_target(old_raw)
+        values = collect_resource(vnode_list, source)
 
-        if old_values is None:
+        # Unsupported source type: deliberately silent.
+        if values is None:
             continue
 
-        if old_values == new_values:
-            continue
+        result[source] = values
 
-        update_target(
-            qmgr=qmgr,
-            source=source,
-            target=target,
-            old_values=old_values,
-            new_values=new_values
-        )
+    return result
+
+
+def load_existing_state(path):
+    """
+    Load an existing generated state file.
+
+    Invalid or unreadable files are treated as absent so they are replaced.
+    """
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
+def same_resources(old_state, resources):
+    """
+    Compare only aggregated resource content.
+
+    Metadata such as generated timestamps must not force needless rewrites.
+    """
+    if not isinstance(old_state, dict):
+        return False
+
+    old_resources = old_state.get("resources")
+    return old_resources == resources
+
+
+def atomic_write_json(path, data):
+    """
+    Atomically replace the state file.
+
+    The temporary file is created in the same directory so os.replace() stays
+    on the same filesystem.
+    """
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o750, exist_ok=True)
+
+    fd, tmppath = tempfile.mkstemp(
+        prefix=".aggregate_resources.",
+        suffix=".tmp",
+        dir=directory
+    )
+
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=4, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.chmod(tmppath, 0o640)
+        os.replace(tmppath, path)
+
+        # Persist the directory entry where supported.
+        try:
+            dirfd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dirfd)
+            finally:
+                os.close(dirfd)
+        except OSError:
+            pass
+
+    except Exception:
+        try:
+            os.unlink(tmppath)
+        except OSError:
+            pass
+        raise
+
+
+def run(config):
+    event = pbs.event()
+    vnode_list = event.vnode_list
+
+    resources = build_resources(
+        vnode_list,
+        config.get("collections", [])
+    )
+
+    path = resolve_state_path(config)
+    old_state = load_existing_state(path)
+
+    if same_resources(old_state, resources):
+        return
+
+    state = {
+        "version": 1,
+        "generated": int(time.time()),
+        "resources": resources
+    }
+
+    atomic_write_json(path, state)
+
+    log(
+        pbs.EVENT_DEBUG,
+        "updated aggregate resource state file %s" % path
+    )
 
 
 def main():

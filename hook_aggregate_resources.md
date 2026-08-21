@@ -2,20 +2,15 @@
 
 ## Overview
 
-`hook_aggregate_resources` is an OpenPBS server-periodic hook that creates
-server-wide string-array indexes from vnode resources.
+`hook_aggregate_resources` is an OpenPBS server-periodic hook that builds
+cluster-wide lists from vnode resources and stores them in a generated JSON
+state file below `PBS_HOME`.
 
-For each configured collection, it:
+This version does **not** modify `server.resources_available` and therefore
+does not invoke `qmgr`.
 
-1. reads a vnode `resources_available` resource from every vnode;
-2. accepts only `string` and `string_array` values;
-3. flattens string arrays;
-4. removes duplicates from the collected vnode values;
-5. lexically sorts the result;
-6. compares it with the existing server target; and
-7. updates the target only when it differs.
-
-No vnode-state filtering is performed.
+The generated file is intended as shared state for other server-side hooks,
+such as a `queuejob` hook that normalizes submitted resource requests.
 
 ## Configuration
 
@@ -23,190 +18,212 @@ The supplied configuration is:
 
 ```json
 {
+    "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
     "collections": [
         {
-            "source": "gpu_cap",
-            "target": "all_gpu_caps"
+            "source": "gpu_cap"
         },
         {
-            "source": "cpu_isa",
-            "target": "all_cpu_isas"
+            "source": "cpu_isa"
         }
     ]
 }
 ```
 
-This maps:
+### `state_file`
+
+`state_file` is interpreted relative to `PBS_HOME`.
+
+For example, with:
 
 ```text
-vnode resources_available.gpu_cap
-    -> server resources_available.all_gpu_caps
-
-vnode resources_available.cpu_isa
-    -> server resources_available.all_cpu_isas
+PBS_HOME=/var/spool/pbs
 ```
 
-## Source types
-
-Only `string` and `string_array` source values are considered.
-
-Other types such as:
+the default setting:
 
 ```text
-boolean
-long
-float
-size
+server_priv/hooks/hook_data/aggregate_resources.json
 ```
 
-are silently skipped.
-
-Unset values on individual vnodes are ignored.
-
-## Deduplication
-
-Collected vnode values are inserted into a Python `set`, then sorted.
-
-Example:
+resolves to:
 
 ```text
-node01 cpu_isa = x86-64-v3
-node02 cpu_isa = x86-64-v3
-node03 cpu_isa = x86-64-v4
+/var/spool/pbs/server_priv/hooks/hook_data/aggregate_resources.json
 ```
 
-produces:
+The path must be relative. Absolute paths are rejected.
 
-```text
-x86-64-v3,x86-64-v4
-```
+After canonicalization, the resulting path must remain inside `PBS_HOME`;
+paths using `..` to escape the PBS tree are rejected.
 
-## Existing-target comparison
+### `collections`
 
-The current server target is intentionally **not deduplicated** before
-comparison.
-
-This is important because an existing malformed value such as:
-
-```text
-x86-64-v1,x86-64-v2,x86-64-v3,x86-64-v3
-```
-
-must differ from the desired canonical value:
-
-```text
-x86-64-v1,x86-64-v2,x86-64-v3
-```
-
-If the old value were passed through a `set`, the duplicate would disappear
-during comparison and the hook would incorrectly conclude that no update was
-necessary.
-
-The existing value is therefore only normalized for whitespace and lexical
-ordering; duplicates are preserved.
-
-## Server updates
-
-`pbs.server()` is read-only in a periodic hook, so changed server targets are
-updated through the local `qmgr` executable.
-
-A changed target is replaced in two steps:
-
-```text
-unset server resources_available.<target>
-set server resources_available.<target> = "value1,value2,..."
-```
-
-The `unset` step is intentional.
-
-For `string_array` resources, assigning a new list without first clearing the
-old value can retain or merge existing members depending on qmgr/resource
-semantics. That can produce duplicate values even if vnode-side collection
-was correctly deduplicated.
-
-Using `unset` followed by `set` guarantees that the published aggregate is a
-canonical replacement containing exactly the desired sorted unique list.
-
-If the desired list is empty, only the `unset` command is executed.
-
-## Change-only behaviour
-
-No qmgr command is executed when the current server target is already exactly
-equal to the desired canonical list.
-
-This minimizes unnecessary server resource changes and scheduler disturbance.
-
-A stale duplicate is considered a real change and is repaired automatically.
-
-## Example
-
-Suppose the server currently contains:
-
-```text
-set server resources_available.all_cpu_isas = x86-64-v1
-set server resources_available.all_cpu_isas += x86-64-v2
-set server resources_available.all_cpu_isas += x86-64-v3
-set server resources_available.all_cpu_isas += x86-64-v3
-```
-
-while vnode collection produces:
-
-```text
-x86-64-v1,x86-64-v2,x86-64-v3
-```
-
-The hook detects the duplicate in the existing value and executes:
-
-```text
-unset server resources_available.all_cpu_isas
-set server resources_available.all_cpu_isas = "x86-64-v1,x86-64-v2,x86-64-v3"
-```
-
-The resulting server array is canonical and contains no duplicate.
-
-## qmgr path
-
-An optional top-level JSON key may specify an absolute qmgr path:
+Each collection contains one vnode `resources_available` resource name:
 
 ```json
 {
-    "qmgr": "/opt/pbs/bin/qmgr",
-    "collections": [...]
+    "source": "gpu_cap"
 }
 ```
 
-If omitted, the hook derives qmgr from:
+The source name is also used as the key in the generated JSON file.
 
-```text
-$PBS_EXEC/bin/qmgr
+## Generated state file
+
+A typical generated file is:
+
+```json
+{
+    "generated": 1787331180,
+    "resources": {
+        "cpu_isa": [
+            "x86-64-v3",
+            "x86-64-v4"
+        ],
+        "gpu_cap": [
+            "sm_80",
+            "sm_89",
+            "sm_90"
+        ]
+    },
+    "version": 1
+}
 ```
 
-using `PBS_EXEC` from the environment or `/etc/pbs.conf`.
+The `resources` object is the stable interface intended for consuming hooks.
+
+A `queuejob` hook can therefore read:
+
+```python
+data["resources"]["gpu_cap"]
+data["resources"]["cpu_isa"]
+```
+
+## Collection semantics
+
+All vnodes in `pbs.event().vnode_list` are considered regardless of vnode
+state.
+
+Only `string` and `string_array` source resources are collected.
+
+Other types are silently skipped.
+
+Unset values on individual vnodes are ignored.
+
+Every string-array member is converted to a plain Python string before
+deduplication:
+
+```python
+str(item).strip()
+```
+
+This avoids duplicate textual values caused by PBS-specific Python wrapper
+objects.
+
+The resulting values are unique and lexically sorted.
+
+## Change-only writes
+
+The hook reads the existing state file and compares only:
+
+```json
+"resources"
+```
+
+with the newly collected resource mapping.
+
+If the resource data is unchanged, the hook does not rewrite the file.
+
+The `generated` timestamp therefore changes only when the aggregate content
+changes.
+
+This avoids unnecessary filesystem activity and provides a meaningful
+generation timestamp.
+
+## Atomic replacement
+
+The state file is never modified in place.
+
+The hook:
+
+1. creates a temporary file in the destination directory;
+2. writes the complete JSON document;
+3. flushes and `fsync()`s the temporary file;
+4. changes its mode to `0640`;
+5. atomically replaces the live file with `os.replace()`.
+
+A consuming `queuejob` hook therefore observes either the previous complete
+file or the new complete file, never a partially written JSON document.
+
+The destination directory is created with mode `0750` if it does not exist.
+
+## Reading from another hook
+
+A server-side consumer can use equivalent PBS_HOME resolution and then:
+
+```python
+with open(path, "r") as f:
+    data = json.load(f)
+
+gpu_caps = data.get("resources", {}).get("gpu_cap", [])
+cpu_isas = data.get("resources", {}).get("cpu_isa", [])
+```
+
+Because updates use atomic rename, explicit file locking is not necessary for
+the normal single-writer/multiple-reader model.
+
+## PBS_HOME discovery
+
+The hook first checks the `PBS_HOME` environment variable.
+
+If it is absent, it reads:
+
+```text
+PBS_CONF_FILE
+```
+
+or, by default:
+
+```text
+/etc/pbs.conf
+```
+
+and obtains `PBS_HOME` from there.
+
+## Hook setup
+
+The supplied qmgr file creates only the periodic hook:
+
+```text
+aggregate_resources
+```
+
+No custom `all_*` server resources are created.
+
+The default period is 300 seconds.
 
 ## Installation
 
-For a new installation:
+Copy the Python and JSON files to the paths referenced by the qmgr setup and
+run:
 
 ```bash
 qmgr < hook_aggregate_resources.qmgr
 ```
 
-For an existing hook, re-import the corrected Python file:
+For an existing hook, re-import both the implementation and configuration:
 
 ```bash
 qmgr -c "import hook aggregate_resources application/x-python default /root/openpbs.hooks/hook_aggregate_resources.py"
+
+qmgr -c "import hook aggregate_resources application/x-config default /root/openpbs.hooks/hook_aggregate_resources.json"
 ```
 
-The JSON configuration does not need to change unless desired.
-
-Inspect the resulting aggregates with:
+After the next periodic run, inspect the generated state file, for example:
 
 ```bash
-qmgr -c "print server"
+cat /var/spool/pbs/server_priv/hooks/hook_data/aggregate_resources.json
 ```
 
-or:
-
-```bash
-qstat -Bf
-```
+using the actual value of `PBS_HOME` on the server.
