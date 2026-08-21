@@ -11,11 +11,16 @@ set resource containers flag = h
 # hook -------------------------------------------
 
 create hook hook_discovery_containers
+set hook hook_discovery_containers type = site
+set hook hook_discovery_containers enabled = true
 set hook hook_discovery_containers event = exechost_startup
 set hook hook_discovery_containers event += exechost_periodic
-set hook hook_discovery_containers enabled = true
+set hook hook_discovery_containers user = pbsadmin
 set hook hook_discovery_containers alarm = 30
-set hook hook_discovery_containers freq = 3600
+set hook hook_discovery_containers freq = 4000
+set hook hook_discovery_containers order = 50
+set hook hook_discovery_containers debug = false
+set hook hook_discovery_containers fail_action = none
 
 # Import the hook implementation and its JSON configuration.
 import hook hook_discovery_containers application/x-python default hook_discovery_containers.py
