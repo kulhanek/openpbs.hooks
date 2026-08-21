@@ -295,7 +295,7 @@ def requested_smt(job):
     """
     Return the job-wide SMT request from schedselect.
 
-    Cross-chunk consistency is validated by hook_job_enqueued at queue time.
+    Cross-chunk consistency is validated by hook_normalize_job_mpiomp at queue time.
     This execution-side parser is deliberately tolerant for already queued or
     otherwise legacy jobs: SMT is enabled if at least one chunk explicitly
     requests smt=true.

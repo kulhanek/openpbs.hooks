@@ -51,7 +51,7 @@ The job still consumes/reserves eight physical cores, but all online logical CPU
 
 ### Multi-chunk requests
 
-`smt` is a **job-wide** cpuset policy. Cross-chunk consistency is validated by `hook_job_enqueued` at `queuejob`, before the job is scheduled. Explicit `smt=true` and `smt=false` values must therefore not be mixed in one `select` request. Chunks which omit `smt` inherit the job-wide setting.
+`smt` is a **job-wide** cpuset policy. Cross-chunk consistency is validated by `hook_normalize_job_mpiomp` at `queuejob`, before the job is scheduled. Explicit `smt=true` and `smt=false` values must therefore not be mixed in one `select` request. Chunks which omit `smt` inherit the job-wide setting.
 
 For robustness with jobs that were queued before the queue hook was installed or updated, this execution hook does not reject contradictory values itself. Its fallback parser enables SMT when **at least one** chunk contains `smt=true`. New submissions should never reach this fallback with contradictory explicit values.
 
@@ -180,6 +180,6 @@ At epilogue it performs a final usage update and removes the cgroup, while retai
 - This is Linux/cgroup-v2-specific code and depends on writable delegated cgroup controller files.
 - Core reservations are tracked in hook state files rather than reconstructed from arbitrary external cpusets. Other software modifying the same CPU placement independently can therefore invalidate the hook's assumptions.
 - CPU quota throttling is not used: `cpu.max` is set to `max 100000`; CPU containment relies on cpusets and whole-core reservation.
-- `smt` is job-wide, not independently configurable per chunk on different hosts; queue-time validation is owned by `hook_job_enqueued`.
+- `smt` is job-wide, not independently configurable per chunk on different hosts; queue-time validation is owned by `hook_normalize_job_mpiomp`.
 - `cpupercent` is based on successive cgroup usage samples and is therefore interval/sampling dependent.
 - Dynamic resizing is deliberately unsupported.
