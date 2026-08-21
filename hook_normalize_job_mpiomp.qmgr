@@ -2,6 +2,12 @@
 # CPU request normalization / MPI+OpenMP validation
 # ---------------------------------------------------------------------------
 
+# resources --------------------------------------
+
+# Preserve the select expression as submitted before hook normalization.
+# This is metadata only; do not add original_select to sched_config resources.
+create resource original_select type=string
+
 # hook -------------------------------------------
 
 create hook job_enqueued
