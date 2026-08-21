@@ -1,3 +1,31 @@
 {
-    "nvidia_smi": "/usr/bin/nvidia-smi"
+    "vendors": {
+        "nvidia": {
+            "enabled": true,
+            "commands": {
+                "nvidia_smi": "/usr/bin/nvidia-smi"
+            },
+            "architectures": {
+                "sm_50": "maxwell",
+                "sm_52": "maxwell",
+                "sm_53": "maxwell",
+                "sm_60": "pascal",
+                "sm_61": "pascal",
+                "sm_62": "pascal",
+                "sm_70": "volta",
+                "sm_72": "volta",
+                "sm_75": "turing",
+                "sm_80": "ampere",
+                "sm_86": "ampere",
+                "sm_87": "ampere",
+                "sm_89": "ada",
+                "sm_90": "hopper",
+                "sm_100": "blackwell",
+                "sm_103": "blackwell",
+                "sm_110": "blackwell",
+                "sm_120": "blackwell",
+                "sm_121": "blackwell"
+            }
+        }
+    }
 }
