@@ -5,8 +5,8 @@
 # resources --------------------------------------
 
 create resource containers
-set resource containers type=string_array
-set resource containers flags=h
+set resource containers type = string_array
+set resource containers flag = h
 
 # hook -------------------------------------------
 
