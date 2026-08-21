@@ -5,7 +5,7 @@ OpenPBS server-periodic hook for aggregating vnode string resources.
 The hook collects configured vnode resources, builds sorted unique lists, and
 stores the result in a generated JSON state file under PBS_HOME.
 
-The output path is configured as a path relative to PBS_HOME.  The hook writes
+The output path is configured as a path relative to PBS_HOME. The hook writes
 the file atomically and replaces it only when the aggregated resource content
 changes.
 
@@ -53,9 +53,6 @@ def load_config():
 
 
 def read_pbs_home():
-    """
-    Determine PBS_HOME from the environment or PBS configuration.
-    """
     value = os.environ.get("PBS_HOME")
     if value:
         return value
@@ -81,11 +78,6 @@ def read_pbs_home():
 
 
 def resolve_state_path(config):
-    """
-    Resolve the configured state_file relative to PBS_HOME.
-
-    Absolute paths and paths escaping PBS_HOME are rejected.
-    """
     relpath = config.get("state_file", DEFAULT_STATE_FILE)
 
     if not isinstance(relpath, str) or not relpath.strip():
@@ -110,16 +102,38 @@ def resolve_state_path(config):
 
 
 def plain_string(value):
-    """
-    Convert a PBS string-like object to a plain Python string.
-    """
     text = str(value).strip()
     return text if text else None
+
+
+def split_string_array_text(value):
+    """
+    Split the textual representation of a PBS string_array.
+
+    OpenPBS may expose a string_array object as a str-like wrapper whose
+    textual representation is comma-separated, for example:
+
+        x86-64-v1,x86-64-v2,x86-64-v3
+
+    Each member must therefore be split and normalized before deduplication.
+    """
+    text = str(value)
+
+    result = []
+    for item in text.split(","):
+        item = item.strip()
+        if item:
+            result.append(item)
+
+    return result
 
 
 def string_values(value):
     """
     Convert a PBS string or string_array value to plain Python strings.
+
+    Important: PBS string_array values can be subclasses/wrappers of str.
+    Therefore the PBS type name must be checked BEFORE isinstance(value, str).
 
     Return:
         list  - valid string/string_array value
@@ -128,10 +142,33 @@ def string_values(value):
     if value is None:
         return []
 
+    typename = type(value).__name__.lower()
+
+    # Detect PBS string_array before the generic Python string test.
+    if "string_array" in typename:
+        # Some PBS versions expose the whole string_array as one str-like
+        # comma-separated object.
+        if isinstance(value, str):
+            return split_string_array_text(value)
+
+        # Other representations may be iterable.
+        result = []
+        try:
+            for item in value:
+                # An individual wrapper element can itself contain a
+                # comma-separated representation, so normalize defensively.
+                result.extend(split_string_array_text(item))
+        except (TypeError, ValueError):
+            return None
+
+        return result
+
+    # Genuine scalar string resource: preserve commas as part of the value.
     if isinstance(value, str):
         text = plain_string(value)
         return [text] if text else []
 
+    # Defensive support for ordinary Python sequences of strings.
     if isinstance(value, (list, tuple)):
         result = []
         for item in value:
@@ -140,19 +177,6 @@ def string_values(value):
             text = plain_string(item)
             if text:
                 result.append(text)
-        return result
-
-    typename = type(value).__name__.lower()
-
-    if "string_array" in typename:
-        result = []
-        try:
-            for item in value:
-                text = plain_string(item)
-                if text:
-                    result.append(text)
-        except (TypeError, ValueError):
-            return None
         return result
 
     return None
@@ -190,9 +214,6 @@ def collect_resource(vnode_list, source):
 
 
 def build_resources(vnode_list, collections):
-    """
-    Build the complete resource mapping from configuration.
-    """
     result = {}
 
     if not isinstance(collections, list):
@@ -213,7 +234,6 @@ def build_resources(vnode_list, collections):
 
         values = collect_resource(vnode_list, source)
 
-        # Unsupported source type: deliberately silent.
         if values is None:
             continue
 
@@ -223,11 +243,6 @@ def build_resources(vnode_list, collections):
 
 
 def load_existing_state(path):
-    """
-    Load an existing generated state file.
-
-    Invalid or unreadable files are treated as absent so they are replaced.
-    """
     try:
         with open(path, "r") as f:
             data = json.load(f)
@@ -238,25 +253,13 @@ def load_existing_state(path):
 
 
 def same_resources(old_state, resources):
-    """
-    Compare only aggregated resource content.
-
-    Metadata such as generated timestamps must not force needless rewrites.
-    """
     if not isinstance(old_state, dict):
         return False
 
-    old_resources = old_state.get("resources")
-    return old_resources == resources
+    return old_state.get("resources") == resources
 
 
 def atomic_write_json(path, data):
-    """
-    Atomically replace the state file.
-
-    The temporary file is created in the same directory so os.replace() stays
-    on the same filesystem.
-    """
     directory = os.path.dirname(path)
     os.makedirs(directory, mode=0o750, exist_ok=True)
 
@@ -276,7 +279,6 @@ def atomic_write_json(path, data):
         os.chmod(tmppath, 0o640)
         os.replace(tmppath, path)
 
-        # Persist the directory entry where supported.
         try:
             dirfd = os.open(directory, os.O_RDONLY)
             try:
