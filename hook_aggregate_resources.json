@@ -1,11 +1,7 @@
 {
     "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
-    "collections": [
-        {
-            "source": "gpu_cap"
-        },
-        {
-            "source": "cpu_isa"
-        }
+    "sources": [
+        "gpu_cap",
+        "cpu_isa"
     ]
 }
