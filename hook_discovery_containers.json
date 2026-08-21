@@ -1,0 +1,52 @@
+{
+    "runtimes": {
+        "apptainer": {
+            "enabled": true,
+            "commands": [
+                "/usr/bin/apptainer",
+                "/usr/local/bin/apptainer"
+            ],
+            "probe": ["version"]
+        },
+        "singularity": {
+            "enabled": true,
+            "commands": [
+                "/usr/bin/singularity",
+                "/usr/local/bin/singularity"
+            ],
+            "probe": ["version"]
+        },
+        "podman": {
+            "enabled": false,
+            "commands": [
+                "/usr/bin/podman",
+                "/usr/local/bin/podman"
+            ],
+            "probe": ["--version"]
+        },
+        "docker": {
+            "enabled": false,
+            "commands": [
+                "/usr/bin/docker",
+                "/usr/local/bin/docker"
+            ],
+            "probe": ["--version"]
+        },
+        "charliecloud": {
+            "enabled": false,
+            "commands": [
+                "/usr/bin/ch-run",
+                "/usr/local/bin/ch-run"
+            ],
+            "probe": ["--version"]
+        },
+        "enroot": {
+            "enabled": false,
+            "commands": [
+                "/usr/bin/enroot",
+                "/usr/local/bin/enroot"
+            ],
+            "probe": ["version"]
+        }
+    }
+}
