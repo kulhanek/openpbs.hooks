@@ -96,10 +96,6 @@ For each select chunk the hook applies the following rules:
 
 Select chunk multipliers and chunk ordering are preserved.
 
-### Operating-system guard
-
-The implementation contains a compatibility guard for old Debian releases: an explicitly requested `os=debianN` with a major release below 10 is rejected.
-
 ### Preserving the original request
 
 Before the first modification, the hook stores the original `Resource_List.select` in `Resource_List.user_select` when `user_select` is unset or empty. If an earlier normalization hook has already stored it, the value is left unchanged.
@@ -126,7 +122,6 @@ The hook consumes or writes the following standard/custom values inside `Resourc
 | `npus_per_core` | Explicit logical processing units per physical core. Defined by CPU discovery setup. |
 | `mpiprocs` | MPI processes per chunk. |
 | `ompthreads` | OpenMP/application threads per MPI process. |
-| `os` | Optionally checked by the Debian compatibility guard. |
 
 ### Interaction with `hook_job_cgroups_v2`
 

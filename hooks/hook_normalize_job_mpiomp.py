@@ -28,7 +28,6 @@ HOOK_NAME = "job_enqueued"
 _TRUE_VALUES = set(["1", "true", "t", "yes", "y", "on"])
 _FALSE_VALUES = set(["0", "false", "f", "no", "n", "off"])
 _INTEGER_RE = re.compile(r"^[0-9]+$")
-_DEBIAN_RE = re.compile(r"^debian([0-9]+)$")
 
 
 def log(level, message):
@@ -118,21 +117,8 @@ class SelectChunk(object):
         fields.extend("%s=%s" % (key, value) for key, value in self.items)
         return ":".join(fields)
 
-
-def validate_legacy_os(chunk):
-    """Preserve the Debian-version guard from the original hook."""
-    os_value = chunk.get("os")
-    if os_value is None:
-        return
-    match = _DEBIAN_RE.match(str(os_value))
-    if match and int(match.group(1)) < 10:
-        fail("chunk %d: unsupported Debian version %s" %
-             (chunk.chunk_no, match.group(1)))
-
-
 def normalize_chunk(text, chunk_no):
     chunk = SelectChunk(text, chunk_no)
-    validate_legacy_os(chunk)
 
     # ncpus: always materialize it in the normalized chunk.
     if chunk.has("ncpus"):
