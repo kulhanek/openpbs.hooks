@@ -256,7 +256,7 @@ def main():
     job = e.job
 
     if "nodes" in job.Resource_List.keys():
-        e.reject("Old syntax rejected. Please use 'select' syntax.")
+        e.reject("Old 'nodes=' syntax rejected. Please use 'select=' syntax.")
         return
 
     if "select" not in job.Resource_List.keys():
