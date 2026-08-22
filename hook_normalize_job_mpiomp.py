@@ -283,13 +283,13 @@ def main():
     # Preserve the original user request exactly once.  On any later queuejob
     # invocation (for example after routing), keep the first value rather than
     # replacing it with an already-normalized select expression.
-    if "original_select" not in job.Resource_List.keys():
-        job.Resource_List["original_select"] = old_select
+    if "user_select" not in job.Resource_List.keys():
+        job.Resource_List["user_select"] = old_select
 
     new_select = normalize_select(old_select)
 
     log(pbs.EVENT_DEBUG, "original select: %s" %
-        str(job.Resource_List["original_select"]))
+        str(job.Resource_List["user_select"]))
     log(pbs.EVENT_DEBUG, "old select: %s" % old_select)
     log(pbs.EVENT_DEBUG, "new select: %s" % new_select)
     job.Resource_List["select"] = pbs.select(new_select)

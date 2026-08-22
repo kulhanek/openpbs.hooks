@@ -5,10 +5,10 @@
 # resources --------------------------------------
 
 # Preserve the select expression as submitted before hook normalization.
-# This is metadata only; do not add original_select to sched_config resources.
+# This is metadata only; do not add user_select to sched_config resources.
 
-create resource original_select
-set resource original_select type = string 
+create resource user_select
+set resource user_select type = string 
 
 # hook -------------------------------------------
 

@@ -35,7 +35,7 @@ compute_86 -> sm_86) is never removed by state-file filtering.
 The final gpu_cap list is sorted and de-duplicated.
 
 Before modifying Resource_List.select, the hook stores the current select in
-Resource_List.original_select only when original_select is None or empty.  This
+Resource_List.user_select only when user_select is None or empty.  This
 allows the first normalization hook in a pipeline to own the backup.
 
 The JSON configuration is intentionally shared with hook_discovery_gpus.
@@ -355,11 +355,11 @@ def backup_select(job, select_text):
     """
     Backup select only if the shared pipeline backup does not already exist.
     """
-    backup = get_resource(job, "original_select")
+    backup = get_resource(job, "user_select")
     if backup is None or str(backup).strip() == "":
-        job.Resource_List["original_select"] = str(select_text)
+        job.Resource_List["user_select"] = str(select_text)
         log(pbs.EVENT_DEBUG,
-            "saved Resource_List.original_select=%s" % select_text)
+            "saved Resource_List.user_select=%s" % select_text)
 
 
 def normalize_job(event, cfg):

@@ -32,16 +32,16 @@ The hook shares its JSON configuration with `hook_discovery_gpus`.
 Before this hook changes `Resource_List.select`, it checks:
 
 ```text
-Resource_List.original_select
+Resource_List.user_select
 ```
 
-If the original_select is `None` or empty, the current select is copied there. If a
+If the user_select is `None` or empty, the current select is copied there. If a
 previous normalization hook has already populated it, the value is preserved.
 
 This permits several normalization hooks to form a pipeline while retaining the
 select expression seen by the first hook that actually modifies it.
 
-The `original_select` resource is deliberately **not** defined by the supplied
+The `user_select` resource is deliberately **not** defined by the supplied
 qmgr file; it is assumed to be owned by the common normalization setup.
 
 ---
