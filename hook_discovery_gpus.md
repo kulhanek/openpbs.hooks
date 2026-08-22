@@ -1,80 +1,77 @@
 # `hook_discovery_gpus`
 
-## 1. Overview
+## Overview
 
-`hook_discovery_gpus` discovers physical GPUs and publishes GPU capacity and descriptive properties on the local PBS vnode. It is intended for `exechost_startup` and `exechost_periodic`.
+`hook_discovery_gpus` discovers physical GPUs installed on PBS execution hosts and publishes GPU count, identity, memory, compute capability, architecture, and CUDA compatibility information as vnode resources.
 
-The hook is structured around vendor-specific configuration under the `vendors` section of the JSON file. Currently only NVIDIA GPUs are supported. NVIDIA discovery uses `nvidia-smi`; support for additional vendors such as AMD can be added later without changing the published resource model.
+The current implementation supports NVIDIA GPUs. The configuration is vendor-oriented so that support for additional GPU vendors can be added later without changing the public resource names.
 
-The hook has no DCGM or AMS dependency. NVIDIA MIG instances are deliberately not treated as independently schedulable GPUs; `ngpus` counts physical GPUs.
+This hook performs hardware discovery only. GPU allocation, device isolation, environment setup, and runtime accounting are handled by `hook_job_gpus`.
 
-## 2. User documentation
+## User documentation
 
-### Published resources
-
-| Resource | Type | Meaning | Example |
-|---|---|---|---|
-| `ngpus` | `long` | Number of physical GPUs detected on the vnode. | `ngpus=4` |
-| `gpu_vendor` | `string` | GPU vendor. Currently `nvidia`. | `gpu_vendor=nvidia` |
-| `gpu_model` | `string` | GPU model detected on the vnode. GPU-homogeneous hosts are expected. | `gpu_model=NVIDIA GeForce RTX 4090` |
-| `gpu_cap` | `string_array` | Native vendor-specific GPU capability. NVIDIA compute capability is normalized to `sm_XX`, e.g. `8.9` becomes `sm_89`. | `gpu_cap=sm_89` |
-| `gpu_arch` | `string_array` | GPU architecture derived from `gpu_cap` through the vendor-specific JSON mapping. | `gpu_arch=ada` |
-| `gpu_mem` | `size` | Total framebuffer memory available on one physical GPU, published in PBS `kb`. The minimum value across detected GPUs is used. | `gpu_mem=49140mb` |
-| `cuda_version` | `string_array` | Maximum CUDA version reported by the installed NVIDIA driver. Normally contains one value. | `cuda_version=13.0` |
-
-`gpu_cap`, `gpu_arch`, and `cuda_version` are defined as `string_array`. Current deployment assumes GPU-homogeneous hosts, so each normally contains exactly one value. `gpu_model` is a scalar `string`; if multiple distinct models are unexpectedly detected, the hook logs a warning and publishes the lexicographically first model.
-
-For NVIDIA the relationship is intentionally simple:
-
-```text
-gpu_model -> detected directly
-gpu_cap   -> normalized compute capability, e.g. sm_89
-gpu_arch  -> configured mapping from gpu_cap, e.g. ada
-```
-
-No model-name pattern matching is used to derive `gpu_arch`.
-
-### Example requests
-
-One GPU with eight CPU cores:
+Users can request GPU resources in a normal PBS `select` specification. For example:
 
 ```bash
 #PBS -l select=1:ncpus=8:ngpus=1
 ```
 
-A capability-specific request:
+Additional discovered GPU properties can be used to constrain node selection, for example:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=sm_90
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_vendor=nvidia
 ```
-
-An architecture-specific request:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_arch=hopper
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=sm_89
 ```
-
-A model-specific request can also be used if desired by site policy:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_model=<configured-model-value>
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_arch=ada
 ```
 
-### Restrictions
+`gpu_mem` represents the memory capacity of an individual physical GPU on the vnode. On a host with several GPUs, the hook publishes the minimum total framebuffer memory among the detected physical GPUs, so a node is not advertised with a per-GPU memory value that some of its GPUs cannot satisfy.
 
-- Currently only NVIDIA GPUs are supported.
-- MIG instances are ignored as scheduling units; `ngpus` is a physical-GPU count.
-- This hook only discovers and publishes GPU resources. Per-job allocation, isolation, environment setup, and accounting are handled by `hook_job_gpus`.
-- If the configured NVIDIA discovery executable is absent, the hook publishes `ngpus=0` and clears all descriptive GPU properties.
-- On older NVIDIA drivers where the `compute_cap` query field is unsupported, model/count/memory discovery continues through a fallback query, but `gpu_cap` and therefore `gpu_arch` remain unset.
-- `gpu_mem` describes memory of one physical GPU, not aggregate framebuffer memory across all GPUs on the vnode. The minimum detected value is published.
-- GPU-homogeneous hosts are expected. The implementation de-duplicates array-valued resources before publishing them. If multiple distinct GPU models are unexpectedly detected, it logs a warning and publishes one deterministic scalar `gpu_model` value.
+`gpu_cap`, `gpu_arch`, and `cuda_version` are string-array resources. The normal GPU capability request syntax may also be normalized by `hook_normalize_job_gpucap`; see that hook's documentation for `exact[...]`, `compat[...]`, and `compute_XX` forms.
 
-## 3. Technical documentation
+## Technical and administration documentation
 
-### Vendor-specific JSON configuration
+### Hook events
 
-The configuration is grouped by GPU vendor:
+The supplied `hook_discovery_gpus.qmgr` installs the hook for:
+
+- `exechost_startup`
+- `exechost_periodic`
+
+The default periodic interval is 1800 seconds and the hook order is 30.
+
+### NVIDIA discovery
+
+The NVIDIA backend uses the configured `nvidia-smi` executable to query physical GPU properties. The implementation publishes physical GPUs rather than MIG instances.
+
+For an NVIDIA host the hook derives:
+
+- physical GPU count;
+- vendor name `nvidia`;
+- GPU model;
+- total framebuffer memory;
+- CUDA compute capability in the form `sm_XX`, for example `sm_86`;
+- architecture name obtained from the configured capability-to-architecture mapping;
+- CUDA version reported by the NVIDIA driver/tooling.
+
+The current design assumes that GPUs in one execution host are homogeneous enough for scalar resources such as `gpu_model`. The array-valued capability and architecture resources are retained deliberately for scheduler matching and future extensibility.
+
+### Configuration
+
+The hook uses the same JSON configuration file as `hook_normalize_job_gpucap`. Important top-level fields are:
+
+| Field | Description |
+| --- | --- |
+| `use_compatible_gpu_cap` | Controls whether an unwrapped `gpu_cap` request is expanded by the normalization hook. It does not change hardware discovery itself. |
+| `state_file` | Cluster-wide aggregate state file used by the normalization hook to filter generated compatibility alternatives. |
+| `vendors` | Vendor-specific discovery configuration. |
+
+The supplied NVIDIA section enables the NVIDIA backend and specifies:
 
 ```json
 {
@@ -87,6 +84,7 @@ The configuration is grouped by GPU vendor:
             "architectures": {
                 "sm_80": "ampere",
                 "sm_86": "ampere",
+                "sm_87": "ampere",
                 "sm_89": "ada",
                 "sm_90": "hopper"
             }
@@ -95,100 +93,28 @@ The configuration is grouped by GPU vendor:
 }
 ```
 
-The supplied configuration contains a broader NVIDIA capability-to-architecture table.
+The actual supplied mapping contains the supported capabilities from older NVIDIA generations through current Blackwell entries. Capability keys are listed by GPU generation. In the normalization hook contained in this archive, compatibility is determined by equal architecture values; mapping order is not used as a minimum-version rule.
 
-| Item | Type | Description |
-|---|---|---|
-| `vendors.nvidia.enabled` | boolean | Enables NVIDIA GPU discovery. |
-| `vendors.nvidia.commands.nvidia_smi` | absolute path | Path to `nvidia-smi`. The hook requires an absolute path. |
-| `vendors.nvidia.architectures` | object/map | Maps normalized NVIDIA `gpu_cap` values such as `sm_89` to architecture names such as `ada`. |
+### PBS resources
 
-The mapping is deliberately configuration data rather than hard-coded Python logic. A future AMD implementation can use its own vendor section and native capability identifiers, for example `gfx942`, while publishing through the same `gpu_cap` and `gpu_arch` resources.
+The supplied `.qmgr` file defines:
 
-### NVIDIA discovery
+| Resource | Type | Flags | Meaning |
+| --- | --- | --- | --- |
+| `ngpus` | `long` | `hn` | Number of physical GPUs on the vnode; consumable by jobs. |
+| `gpu_mem` | `size` | `hl` | Minimum total framebuffer memory of one detected physical GPU. |
+| `gpu_vendor` | `string` | `h` | GPU vendor, currently `nvidia`. |
+| `gpu_model` | `string` | `h` | GPU model. |
+| `gpu_cap` | `string_array` | `ho` | GPU compute capability, e.g. `sm_86`. |
+| `gpu_arch` | `string_array` | `ho` | Architecture family, e.g. `ampere`, `ada`, or `hopper`. |
+| `cuda_version` | `string_array` | `ho` | CUDA version reported for the host. |
 
-The hook first executes:
+### Interaction with other hooks
 
-```text
-nvidia-smi --query-gpu=index,name,compute_cap,memory.total --format=csv,noheader,nounits
-```
+`hook_normalize_job_gpucap` consumes the architecture mapping in this hook's configuration and can consume the aggregate GPU capability state produced by `hook_aggregate_resources`.
 
-For every successfully parsed physical GPU row it collects:
+`hook_job_gpus` consumes the scheduled `ngpus` allocation at execution time, selects concrete GPU devices, isolates them through the job cgroup, sets CUDA environment variables, and publishes GPU usage accounting.
 
-- model name (published as the scalar `gpu_model` resource),
-- compute capability,
-- framebuffer memory.
+### Administration notes
 
-NVIDIA compute capability is converted to the native capability string used by PBS:
-
-```text
-7.5  -> sm_75
-8.0  -> sm_80
-8.9  -> sm_89
-9.0  -> sm_90
-10.0 -> sm_100
-12.1 -> sm_121
-```
-
-Each resulting `gpu_cap` is then looked up directly in `vendors.nvidia.architectures`. For example:
-
-```text
-sm_80 -> ampere
-sm_86 -> ampere
-sm_89 -> ada
-sm_90 -> hopper
-```
-
-If a detected `gpu_cap` has no mapping, the hook still publishes the capability, leaves the corresponding `gpu_arch` unset, and writes a warning to the PBS log. Discovery is therefore not broken by a newly introduced GPU capability whose architecture mapping has not yet been added to the JSON configuration.
-
-If querying `compute_cap` is unsupported, the hook falls back to:
-
-```text
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits
-```
-
-This preserves `ngpus`, `gpu_vendor`, `gpu_model`, and `gpu_mem` discovery, while `gpu_cap` and `gpu_arch` remain unset.
-
-`memory.total` is reported by `nvidia-smi` in MiB with `nounits`; the hook converts it to KiB by multiplying by 1024 and publishes it with the PBS `kb` suffix.
-
-The hook separately executes ordinary `nvidia-smi` output and extracts the `CUDA Version:` field for `cuda_version`. Although this discovery currently produces one version, it is published through a `string_array` resource.
-
-### Publishing and stale values
-
-The discovered values are published only to local vnodes. Empty descriptive values are assigned as `None`, which clears stale resource values if GPUs disappear, a vendor is disabled, or a property can no longer be detected.
-
-Published descriptive resources are:
-
-```text
-gpu_vendor
-gpu_model
-gpu_cap
-gpu_arch
-gpu_mem
-cuda_version
-```
-
-### Limitations and failure behaviour
-
-- The current Python implementation contains an NVIDIA discovery backend only.
-- The CSV parser assumes the fields produced by `nvidia-smi` follow the expected query format.
-- CUDA compatibility is represented by the driver-reported `CUDA Version`, not by discovery of an installed CUDA Toolkit.
-- If the configured `nvidia-smi` executable exists but both GPU queries fail, the hook raises an error and rejects the event.
-- If no supported vendor is enabled, `ngpus=0` is published and descriptive GPU resources are cleared.
-- Local-vnode identification is based on PBS/local host names; absence of a matching local vnode causes event rejection.
-
-## 4. qmgr setup
-
-The supplied qmgr setup defines:
-
-```text
-ngpus        : long
-gpu_vendor   : string
-gpu_model    : string
-gpu_cap      : string_array
-gpu_arch     : string_array
-gpu_mem      : size
-cuda_version : string_array
-```
-
-It also creates and configures the `discovery_gpus` hook for `exechost_startup` and `exechost_periodic`, then imports the Python hook and JSON configuration.
+If NVIDIA discovery is disabled or `nvidia-smi` is unavailable, no NVIDIA resources should be advertised for that host. Administrators should keep the architecture mapping consistent with the capabilities present in the cluster and with the desired compatibility semantics of `hook_normalize_job_gpucap`.

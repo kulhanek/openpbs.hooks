@@ -1,185 +1,152 @@
 # `hook_job_cgroups_v2`
 
-## 1. Overview
+## Overview
 
-`hook_job_cgroups_v2` provides per-job **cgroup v2 CPU and memory management**. It reserves whole physical CPU cores, constructs a per-job cpuset, optionally exposes SMT sibling PUs, applies memory/swap limits, attaches launched processes to the job cgroup, and updates PBS resource usage.
+`hook_job_cgroups_v2` provides per-job CPU and memory isolation using Linux cgroup v2. It creates one job cgroup on each execution host used by the job, selects physical CPU cores assigned to that host, configures the corresponding cpuset and memory limits, moves job processes into the cgroup, and records CPU/memory usage for PBS accounting.
 
-The hook is specifically designed around the convention that `resources_available.ncpus` represents **physical CPU cores**. CPU topology is read directly from Linux sysfs, so mixed-SMT and hybrid processors and non-trivial logical-CPU numbering are supported without assuming a fixed thread/core ratio.
+The hook is designed around this site's CPU resource model: `ncpus` is physical-core capacity. Without SMT, one logical CPU from each allocated physical core is exposed to the job. With `smt=true`, all online SMT siblings of each allocated physical core are exposed.
 
-The hook owns the lifetime of the job cgroup. `hook_job_gpus` may attach a cgroup-device BPF program to that cgroup but must run after this hook and must not create or delete the cgroup itself.
+GPU device filtering is deliberately not implemented here. `hook_job_gpus` attaches GPU device controls to the cgroup created by this hook.
 
-## 2. User documentation
+## User documentation
 
-### Resources operated by the hook
-
-| Resource | Direction | Meaning |
-|---|---|---|
-| `ncpus` | request/allocation | Number of **physical CPU cores** reserved for the job on each host. |
-| `smt` | request | Boolean request controlling whether all online SMT siblings of each selected physical core are exposed inside the job cpuset. |
-| `mem` | request + `resources_used` | Requested memory becomes `memory.max`. If omitted/non-positive, `memory_default` is used. Peak cgroup memory becomes `resources_used.mem`. |
-| `vmem` | request + `resources_used` | If supplied with `mem`, the difference `vmem - mem` becomes the cgroup swap limit. `resources_used.vmem` is peak memory plus peak swap when enabled. |
-| `nthreads` | `resources_used` | Job-wide total of the normalized `nthreads` values across all select chunks, including chunk multiplicities. |
-| `smt` | `resources_used` | Boolean recording whether SMT was enabled for this job. |
-| `cput` | `resources_used` | CPU time derived from cgroup `cpu.stat` usage. |
-| `cpupercent` | `resources_used` | Approximate CPU utilisation calculated from the change in cgroup CPU usage between updates. |
-
-The hook expects the custom request resource:
-
-```qmgr
-create resource smt
-set resource smt type = boolean
-set resource smt flag = h
-```
-
-`nthreads` and `smt` must also be defined appropriately if their `resources_used` values are to be retained by PBS/site configuration.
-
-### Normal CPU request
+For ordinary jobs the hook is automatic. A request such as:
 
 ```bash
 #PBS -l select=1:ncpus=8:mem=16gb
 ```
 
-This reserves eight whole physical cores. With no SMT request, the hook places one logical CPU (the primary thread) from each selected core into the job cpuset. The sibling logical CPUs remain unavailable for allocation to another job because the hook records the physical core as reserved.
+causes the execution host to create a cgroup containing the CPU and memory resources assigned to the local part of the job. Processes started by PBS are placed into that cgroup automatically.
 
-### Requesting SMT
+### SMT requests
+
+A job may request SMT explicitly:
 
 ```bash
-#PBS -l select=1:ncpus=8:mem=16gb:smt=true
+#PBS -l select=1:ncpus=8:smt=true
 ```
 
-The job still consumes/reserves eight physical cores, but all online logical CPU siblings belonging to those cores are added to the cpuset. On a uniform 2-way SMT request with `npus_per_core=2`, this contributes `nthreads=16` to the job-wide `resources_used.nthreads` total. For generic/hybrid `smt=true` requests without `npus_per_core`, queue-time `nthreads` remains equal to `ncpus`; the local cgroup may nevertheless expose additional topology-dependent SMT siblings.
+`ncpus=8` still reserves eight physical cores. With `smt=true`, all online hardware threads belonging to those eight cores are exposed. The actual number of logical CPUs is recorded in `resources_used.nthreads` and can depend on the host topology.
 
-### Multi-chunk requests
+For MPI/OpenMP jobs that need a predictable application thread count, use the conventions documented for `hook_normalize_job_mpiomp`, including `npus_per_core` when an exact SMT expansion is required.
 
-`smt` is a **job-wide** cpuset policy. Cross-chunk consistency is validated by `hook_normalize_job_mpiomp` at `queuejob`, before the job is scheduled. Explicit `smt=true` and `smt=false` values must therefore not be mixed in one `select` request. Chunks which omit `smt` inherit the job-wide setting.
+### Memory limits
 
-For robustness with jobs that were queued before the queue hook was installed or updated, this execution hook does not reject contradictory values itself. Its fallback parser enables SMT when **at least one** chunk contains `smt=true`. New submissions should never reach this fallback with contradictory explicit values.
+When `mem` is requested, the job cgroup enforces a physical-memory limit. When `vmem` is also available, the hook derives the cgroup swap allowance from the relationship between `mem` and `vmem`.
 
-If `smt` is absent from all chunks, it defaults to false.
+Exceeding a cgroup memory limit can cause the kernel to terminate processes in the job. This is an enforced limit, not merely an accounting value.
 
-### Restrictions
+### Multi-node and multi-chunk jobs
 
-- The local vnode allocated to the job must advertise `resources_available.cgroups` containing `v2`; otherwise the job is rejected at `execjob_begin`.
-- Every local job must allocate at least one physical CPU core (`ncpus > 0`).
-- Only cgroup v2 is supported.
-- Dynamic resource resizing is not supported; `execjob_resize` is rejected.
-- The hook must run before `hook_job_gpus` on `execjob_begin`.
-- `vmem < mem` is normalised upward to `mem`; swap is never configured as a negative amount.
+On each execution host, requests from all chunks placed on that host are aggregated into one local job cgroup and one cpuset. There is not a separate cgroup for each `select` chunk.
 
-## 3. Technical documentation
+Processes launched on sister hosts through PBS-aware launch mechanisms are attached to the corresponding job cgroup on those hosts.
 
-### Events
+## Technical and administration documentation
 
-The supplied qmgr configuration enables:
+### Hook events
+
+The supplied `hook_job_cgroups_v2.qmgr` installs the hook for:
+
+- `exechost_startup`
+- `exechost_periodic`
+- `execjob_begin`
+- `execjob_launch`
+- `execjob_attach`
+- `execjob_epilogue`
+- `execjob_end`
+- `execjob_abort`
+- `execjob_resize`
+
+The periodic interval is 120 seconds and the hook order is 10. It must run before hooks that depend on the job cgroup, notably `hook_job_gpus`.
+
+### Cgroup hierarchy
+
+The supplied configuration is:
+
+```json
+{
+    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
+    "jobs_subdir": "pbs_jobs",
+    "state_subdir": "cgroup_v2",
+    "placement": "packed",
+    "memory_default": "400MB",
+    "publish_vmem": true,
+    "periodic_usage_update": true,
+    "kill_timeout": 10,
+    "cpu_weight": 100
+}
+```
+
+Job cgroups are created below:
 
 ```text
-exechost_startup
-exechost_periodic
-execjob_begin
-execjob_launch
-execjob_attach
-execjob_epilogue
-execjob_end
-execjob_abort
-execjob_resize
+<cgroup_root>/<jobs_subdir>/<job-id>
 ```
 
-It configures hook order `10`, periodic frequency `120` seconds, and imports both the Python hook and JSON configuration.
+The hook enables and uses the cgroup v2 `cpuset`, `cpu`, and `memory` controllers. The PBS Mom service cgroup must therefore be configured with delegation sufficient for the daemon to create and manage child cgroups and controllers. On systemd-based hosts, the PBS Mom unit must have appropriate `Delegate=` configuration.
 
-### Systemd/cgroup requirements
+### Configuration fields
 
-The default delegated cgroup root is:
+| Field | Description |
+| --- | --- |
+| `cgroup_root` | cgroup v2 directory containing the PBS Mom service. |
+| `jobs_subdir` | Child directory used for PBS job cgroups. |
+| `state_subdir` | Directory below the Mom private directory used for persistent hook state. |
+| `placement` | CPU-core placement policy. Supported implementation values include packed/balanced placement. |
+| `memory_default` | Memory limit used when a local job allocation does not provide an explicit `mem` value. |
+| `publish_vmem` | Whether virtual-memory usage is published to PBS accounting. |
+| `periodic_usage_update` | Whether the periodic event refreshes running-job usage. |
+| `kill_timeout` | Time allowed during cgroup cleanup before stronger termination/cleanup actions. |
+| `cpu_weight` | Value written to cgroup v2 `cpu.weight`, constrained to the kernel-supported range. |
 
-```text
-/sys/fs/cgroup/system.slice/pbs-mom.service
-```
+### CPU selection
 
-and per-job cgroups are created under:
+The hook reads Linux CPU topology and maintains state so that simultaneously running PBS jobs do not reserve the same physical cores.
 
-```text
-/sys/fs/cgroup/system.slice/pbs-mom.service/pbs_jobs/<jobid>
-```
+For a local allocation of `ncpus=N`:
 
-The source requires the `pbs_mom` systemd unit to delegate its cgroup hierarchy and keep the unit cgroup suitable for enabling controllers. The documented systemd >= 254 arrangement is:
+1. `N` physical cores are selected.
+2. Without SMT, one online logical CPU per selected core is placed in `cpuset.cpus`.
+3. With `smt=true`, all online siblings of those selected cores are placed in the cpuset.
+4. The corresponding NUMA memory nodes are written to `cpuset.mems`.
 
-```ini
-[Service]
-Delegate=yes
-DelegateSubgroup=mom
-```
+The whole physical core remains reserved to the PBS job even when only one logical thread is exposed. Hybrid or asymmetric SMT topologies are supported; consequently `resources_used.nthreads` is derived from the actual cpuset rather than assumed to be `ncpus * 2`.
 
-At startup the hook verifies that unified cgroup v2 is mounted, enables available `cpu`, `cpuset`, and `memory` controllers below the delegated hierarchy, creates the jobs subdirectory, and initialises inherited cpuset values where necessary.
+### Memory enforcement
 
-### Physical-core allocation
+The hook writes `memory.max` from the local `mem` allocation. When both `mem` and `vmem` are positive, `memory.swap.max` is derived as `vmem - mem`; invalid cases where `vmem < mem` are normalized so the virtual-memory limit is not below physical memory. When no finite swap limit can be derived, the implementation can use the cgroup v2 unlimited value.
 
-CPU topology is derived from `/sys/devices/system/cpu`. Logical CPUs are grouped using `core_cpus_list`, with `thread_siblings_list` as a fallback. For each physical core the hook records:
+### Resource and capability dependencies
 
-- sibling logical CPU IDs;
-- a primary logical CPU (the lowest sibling ID);
-- package/die/core identifiers;
-- NUMA node;
-- a stable core key based on its sibling CPU list.
+This `.qmgr` file creates no custom PBS resources. The hook consumes resources defined elsewhere:
 
-Persistent per-job state records reserved core keys. This prevents a different job from receiving an SMT sibling of a core already reserved by another job, even when the first job exposes only its primary thread.
+| Resource | Source | Use |
+| --- | --- | --- |
+| `ncpus` | Standard PBS resource, populated by CPU discovery | Number of physical cores to reserve locally. |
+| `mem` | Standard PBS resource | cgroup physical-memory limit. |
+| `vmem` | Standard PBS resource | Used to derive swap/virtual-memory enforcement. |
+| `smt` | `hook_discovery_cpus.qmgr` | Whether all SMT siblings of selected cores should be exposed. |
+| `cgroups` | `hook_discovery_node.qmgr` | Execution vnode must advertise `v2`. |
+| `nthreads` | `hook_discovery_cpus.qmgr` | Resource/accounting vocabulary for logical CPUs. |
 
-`placement` determines how free physical cores are selected:
-
-- `packed`: prefer as few NUMA nodes as possible, choosing the fullest NUMA nodes first;
-- `balanced`: round-robin physical cores across NUMA nodes.
-
-The job cpuset's `cpuset.mems` is the set of NUMA nodes corresponding to the selected cores.
-
-### Memory control
-
-`memory.max` is set to the requested local `mem`, or to `memory_default` if no positive `mem` value is available. If the effective memory limit is non-positive, `memory.max` is set to `max`.
-
-When both positive `vmem` and `mem` are available, the hook sets:
-
-```text
-memory.swap.max = max(0, vmem - mem)
-```
-
-Otherwise swap remains unlimited (`max`). Thus `vmem` is interpreted as total virtual-memory allowance (`RAM + swap`), not as a swap-only value.
-
-### Process attachment
-
-- `execjob_launch`: the hook attaches the process session associated with the MoM launch path to the job cgroup.
-- `execjob_attach`: the explicitly supplied PID/session is attached to the existing job cgroup.
+At `execjob_begin`, every local allocated vnode must advertise cgroup v2. A job is rejected on a local vnode that does not.
 
 ### Usage accounting
 
-The hook reads cgroup usage files and updates PBS usage:
+The hook updates standard/custom `resources_used` values from cgroup files, including:
 
-- CPU usage from `cpu.stat` (`usage_usec`) -> `resources_used.cput`;
-- peak/current memory -> `resources_used.mem`;
-- peak/current swap combined with memory -> `resources_used.vmem` when enabled;
-- interval CPU usage -> `resources_used.cpupercent`;
-- normalized job allocation -> job-wide `resources_used.nthreads` and `resources_used.smt`;
-- local state separately retains the actual local cpuset PU count as `nthreads_local`.
+- `cput` from `cpu.stat`;
+- `cpupercent` from CPU-usage deltas;
+- `mem` from cgroup memory usage/peak data;
+- `vmem` when enabled, including swap usage as implemented;
+- `nthreads` as the actual number of logical CPUs exposed in the job cpuset;
+- `smt` as the effective SMT mode.
 
-Periodic accounting can be disabled. The hook also removes stale cgroups/state for jobs no longer present in the MoM periodic job list, with a short grace interval after creation.
+The periodic event can refresh these values while a job runs, and the epilogue records final usage before cleanup.
 
-At epilogue it performs a final usage update and removes the cgroup, while retaining state until the end event so other hooks/late accounting can still inspect the allocation. At end/abort it removes both cgroup and state.
+### Lifecycle and state
 
-### JSON configuration
+The hook stores allocation state below the Mom private directory, using `state_subdir`. The periodic event also removes orphaned state/cgroups left by jobs that no longer exist.
 
-| Item | Type | Default | Description |
-|---|---:|---:|---|
-| `cgroup_root` | string/path | `/sys/fs/cgroup/system.slice/pbs-mom.service` | Delegated cgroup-v2 root belonging to `pbs_mom`. |
-| `jobs_subdir` | string | `pbs_jobs` | Directory below `cgroup_root` in which per-job cgroups are created. |
-| `state_subdir` | string | `cgroup_v2` | Persistent state directory below `PBS_MOM_HOME/mom_priv/hooks/`. |
-| `placement` | string | `packed` | Physical-core placement policy. Recognised design values are `packed` and `balanced`; any value other than `balanced` follows the packed branch. |
-| `memory_default` | size | `400MB` | Memory limit used when a positive local `mem` request cannot be obtained. |
-| `publish_vmem` | boolean | `true` | Whether to update `resources_used.vmem`. This does not disable application of an explicitly requested vmem/swap limit. |
-| `periodic_usage_update` | boolean | `true` | If true, refresh usage values for live jobs during `exechost_periodic`. |
-| `kill_timeout` | number/seconds | `10` | Maximum wait while terminating processes before removing a job cgroup. |
-| `cpu_weight` | integer | `100` | Value written to cgroup `cpu.weight`, clamped by the implementation to `1..10000`. The hook leaves `cpu.max` unlimited. |
-
-### Limitations and design notes
-
-- This is Linux/cgroup-v2-specific code and depends on writable delegated cgroup controller files.
-- Core reservations are tracked in hook state files rather than reconstructed from arbitrary external cpusets. Other software modifying the same CPU placement independently can therefore invalidate the hook's assumptions.
-- CPU quota throttling is not used: `cpu.max` is set to `max 100000`; CPU containment relies on cpusets and whole-core reservation.
-- `smt` is job-wide, not independently configurable per chunk on different hosts; queue-time validation is owned by `hook_normalize_job_mpiomp`.
-- `cpupercent` is based on successive cgroup usage samples and is therefore interval/sampling dependent.
-- Dynamic resizing is deliberately unsupported.
+`execjob_launch` and `execjob_attach` move job/session PIDs into the job cgroup. The epilogue/end/abort paths perform final accounting and cleanup. Dynamic job resizing is not supported by this implementation and is rejected.

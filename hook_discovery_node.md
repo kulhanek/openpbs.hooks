@@ -1,102 +1,82 @@
 # `hook_discovery_node`
 
-## 1. Overview
+## Overview
 
-`hook_discovery_node` publishes basic execution-node identity and platform properties: a site-defined operating-system token, OS family, cgroup hierarchy version, and PBS server name. It is intended for `exechost_startup` and `exechost_periodic`.
+`hook_discovery_node` publishes basic execution-host classification information: operating-system identity, operating-system family, detected Linux cgroup version, and the PBS server associated with the execution host.
 
-The OS values are not inferred from hard-coded distribution rules. Instead, the hook reads `PRETTY_NAME` from `os-release` and matches it against an ordered mapping in the hook JSON configuration.
+These resources provide a common foundation for scheduling constraints and for other execution hooks that depend on operating-system or cgroup capabilities.
 
-## 2. User documentation
+## User documentation
 
-### Published resources
-
-| Resource | Meaning | Example use |
-|---|---|---|
-| `os` | Site-defined operating-system token selected from the configured `PRETTY_NAME` map. | `select=1:ncpus=8:os=ubuntu24` |
-| `osfamily` | Site-defined OS family from the same mapping. | `select=1:ncpus=8:osfamily=ubuntu` |
-| `cgroups` | Cgroup hierarchy token, either `v1` or `v2`. | `select=1:ncpus=8:cgroups=v2` |
-| `pbs_server` | PBS server name associated with the execution host. | Can be used as a node-selection property in multi-server/site-specific deployments. |
-
-Example OS-specific request using the supplied configuration:
+Users can constrain jobs to a particular operating-system image or family when software compatibility requires it. For example:
 
 ```bash
 #PBS -l select=1:ncpus=8:os=ubuntu24
 ```
 
-Request any Ubuntu-family node:
+or:
 
 ```bash
 #PBS -l select=1:ncpus=8:osfamily=ubuntu
 ```
 
-Request a node advertising cgroup v2:
+The `cgroups` resource can be inspected to determine which cgroup implementation a node advertises. In this hook set, `hook_job_cgroups_v2` requires `v2` on every execution vnode used by a job.
 
-```bash
-#PBS -l select=1:ncpus=8:cgroups=v2
-```
+`pbs_server` identifies the PBS server to which the execution host belongs. It is mainly useful for administration and cluster classification rather than for ordinary job requests.
 
-### Restrictions
+## Technical and administration documentation
 
-- `PRETTY_NAME` must match at least one configured `distros` entry. If it does not, discovery fails rather than silently inventing or falling back to an OS token.
-- Distribution mappings are evaluated in order and the **first matching entry wins**.
-- Matching is case-sensitive because the implementation uses `fnmatch.fnmatchcase()`.
-- A matching distro entry must define both `os` and `osfamily`.
-- The cgroup resource reports the host hierarchy only; enforcement is performed by other hooks such as `hook_job_cgroups_v2`.
+### Hook events
 
-## 3. Technical documentation
+The supplied `hook_discovery_node.qmgr` installs the hook for:
 
-### OS detection
+- `exechost_startup`
+- `exechost_periodic`
 
-The hook reads `PRETTY_NAME` first from `/etc/os-release`, then from `/usr/lib/os-release`. It compares the complete string with each configured `distros[].name` shell-style glob.
+The default periodic interval is 8000 seconds and the hook order is 10, making it the earliest of the supplied discovery hooks.
 
-For the supplied configuration, a value such as:
+### Operating-system detection
 
-```text
-Ubuntu 24.04.4 LTS
-```
+The hook reads `PRETTY_NAME` from `/etc/os-release`, falling back to `/usr/lib/os-release`. It then evaluates the ordered `distros` mapping from the JSON configuration. The first matching wildcard rule supplies both `os` and `osfamily`.
 
-matches:
+The supplied mappings classify current Debian and Ubuntu releases, for example:
 
-```json
-{
-  "name": "*Ubuntu 24.04*",
-  "os": "ubuntu24",
-  "osfamily": "ubuntu"
-}
-```
+- Debian 14 -> `os=debian14`, `osfamily=debian`;
+- Ubuntu 26.04 -> `os=ubuntu26`, `osfamily=ubuntu`;
+- Debian 13 -> `debian13` / `debian`;
+- Ubuntu 24.04 -> `ubuntu24` / `ubuntu`;
+- Debian 12 -> `debian12` / `debian`;
+- Ubuntu 22.04 -> `ubuntu22` / `ubuntu`.
 
-The glob is matched against the entire `PRETTY_NAME` string; leading/trailing `*` wildcards are therefore useful when matching only a stable substring.
+An unrecognized distribution is treated as a configuration/detection error rather than being silently assigned an arbitrary name.
 
 ### Cgroup detection
 
-Cgroup detection follows this precedence:
+The hook determines the active Linux cgroup generation. It first considers the kernel `systemd.unified_cgroup_hierarchy` setting where present, then falls back to filesystem/mount evidence such as `/sys/fs/cgroup/cgroup.controllers`.
 
-1. `systemd.unified_cgroup_hierarchy=0` in `/proc/cmdline` -> `v1`.
-2. `systemd.unified_cgroup_hierarchy=1` in `/proc/cmdline` -> `v2`.
-3. Presence of `/sys/fs/cgroup/cgroup.controllers` -> `v2`.
-4. `/proc/self/mountinfo` containing a `cgroup2` filesystem -> `v2`.
-5. `/proc/self/mountinfo` containing a `cgroup` filesystem -> `v1`.
-
-If none of these methods succeeds, the hook raises an error.
+The published `cgroups` value is `v1` or `v2`.
 
 ### PBS server detection
 
-The hook first tries `pbs.server().name`. If that is unavailable, it reads `PBS_SERVER` from `PBS_CONF_FILE` (default `/etc/pbs.conf`). Failure of both methods is fatal to the discovery event.
+`pbs_server` is taken from the PBS server object when available and otherwise falls back to `PBS_SERVER` from `pbs.conf`.
 
-### JSON configuration
+### Configuration
 
-| Item | Type | Default | Description |
-|---|---:|---:|---|
-| `distros` | array | `[]` | Ordered list mapping Linux `PRETTY_NAME` strings to site OS tokens. |
-| `distros[].name` | string | — | Shell-style, case-sensitive glob matched against `PRETTY_NAME`. |
-| `distros[].os` | string | — | Value published as `resources_available.os`. Required on a matching entry. |
-| `distros[].osfamily` | string | — | Value published as `resources_available.osfamily`. Required on a matching entry. |
+The JSON configuration contains the ordered `distros` list. Each entry provides a wildcard pattern for the OS `PRETTY_NAME` and the values to publish as `os` and `osfamily`.
 
-The supplied configuration defines Debian 12/13/14 and Ubuntu 22.04/24.04/26.04 mappings.
+Administrators adding an operating-system release should add a sufficiently specific mapping before broader rules that could also match it.
 
-### Limitations and failure behaviour
+### PBS resources
 
-- The hook is Linux-specific because it relies on `os-release`, `/proc`, and Linux cgroup filesystem conventions.
-- A new distribution/release must be added to the JSON map before the hook will accept it.
-- Because first match wins, broad patterns placed before specific patterns can shadow them.
-- The hook publishes values only to vnodes recognised as local to the current MoM; failure to find a local vnode rejects the event.
+The supplied `.qmgr` file defines:
+
+| Resource | Type | Flags | Meaning |
+| --- | --- | --- | --- |
+| `os` | `string` | `h` | Site-normalized operating-system release identifier. |
+| `osfamily` | `string` | `h` | Operating-system family. |
+| `cgroups` | `string_array` | `h` | Detected Linux cgroup generation. |
+| `pbs_server` | `string` | `h` | PBS server associated with the execution host. |
+
+### Interaction with other hooks
+
+Most importantly, `hook_job_cgroups_v2` checks the `cgroups` vnode resource and refuses execution on a local vnode that does not advertise cgroup v2. The OS resources may also be consumed by normalization or site policy hooks.

@@ -1,149 +1,122 @@
 # `hook_job_gpus`
 
-## 1. Overview
+## Overview
 
-`hook_job_gpus` manages whole NVIDIA GPUs for running PBS jobs. It allocates physical GPUs to the local job, optionally isolates GPU device nodes with a cgroup-v2 `BPF_CGROUP_DEVICE` program, manages DRM device ACLs, sets CUDA visibility for launched processes, and records lightweight GPU utilisation/memory telemetry from `nvidia-smi`.
+`hook_job_gpus` turns a scheduled `ngpus` allocation into a concrete set of NVIDIA devices on each execution host. It tracks device ownership, attaches GPU device isolation to the cgroup created by `hook_job_cgroups_v2`, sets CUDA visibility for launched processes, and records lightweight GPU usage accounting.
 
-CPU/memory cgroup creation is intentionally outside this hook. The job cgroup must already have been created by `hook_job_cgroups_v2`; consequently the supplied configuration runs `job_gpus` after the cgroup hook (`order=20` versus `order=10`).
+The current implementation supports whole physical NVIDIA GPUs. MIG devices are not supported.
 
-## 2. User documentation
+## User documentation
 
-### GPU requests
-
-The hook consumes the local `ngpus` assignment from `exec_vnode`. A normal request is:
+Users request GPUs through the standard `ngpus` resource, normally together with CPU and memory resources:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
 ```
 
-or, for two GPUs:
+The user does not choose physical GPU indices. On each execution host, the hook selects the required number of free GPUs and restricts the job to those devices.
 
-```bash
-#PBS -l select=1:ncpus=16:ngpus=2
+At process launch the hook sets:
+
+- `CUDA_VISIBLE_DEVICES` to the UUIDs of the GPUs assigned to the local job;
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID` when GPUs are assigned.
+
+A job requesting no GPUs receives an empty CUDA visibility setting so that it does not accidentally use GPUs that were not allocated to it.
+
+GPU usage is reported in PBS accounting while the job runs. In the current implementation:
+
+- `resources_used.gpupercent` is a running arithmetic mean of the summed utilization percentages of all GPUs allocated on the local host; for multiple GPUs it can therefore exceed 100;
+- `resources_used.gpumemmaxpercent` is the maximum observed aggregate fraction of allocated GPU framebuffer memory in use and is in the range 0-100.
+
+GPU telemetry is intentionally lightweight and periodic, so these values are samples rather than a full high-frequency performance trace.
+
+## Technical and administration documentation
+
+### Hook events and ordering
+
+The supplied `hook_job_gpus.qmgr` installs the hook for:
+
+- `exechost_periodic`
+- `execjob_begin`
+- `execjob_launch`
+- `execjob_epilogue`
+- `execjob_end`
+- `execjob_abort`
+- `execjob_resize`
+
+The periodic interval is 30 seconds and the hook order is 20. `hook_job_cgroups_v2` runs earlier at order 10 and must create the per-job cgroup before this hook attempts device isolation.
+
+### Configuration
+
+The supplied JSON configuration is based on:
+
+```json
+{
+    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
+    "jobs_subdir": "pbs_jobs",
+    "state_subdir": "gpu_v2",
+    "nvidia_smi": "/usr/bin/nvidia-smi",
+    "device_isolation": true,
+    "manage_drm_acl": true,
+    "telemetry": true,
+    "allocation": "index"
+}
 ```
 
-The hook allocates complete physical GPUs. MIG and MIC are intentionally unsupported.
+| Field | Description |
+| --- | --- |
+| `cgroup_root` | Same PBS Mom cgroup root used by `hook_job_cgroups_v2`. |
+| `jobs_subdir` | Directory containing per-job cgroups. Must match the cgroup hook. |
+| `state_subdir` | Mom-private directory used to persist GPU allocation/accounting state. |
+| `nvidia_smi` | Absolute path to `nvidia-smi`. |
+| `device_isolation` | Enable cgroup-v2 GPU device isolation. |
+| `manage_drm_acl` | Manage access to related DRM device nodes when required. |
+| `telemetry` | Enable periodic GPU utilization/memory sampling. |
+| `allocation` | Physical-GPU selection policy. The implementation supports index-based allocation and topology-aware/NUMA selection where configured. |
 
-### Environment set for launched processes
+### Device allocation
 
-| Variable | Meaning |
-|---|---|
-| `CUDA_VISIBLE_DEVICES` | Comma-separated GPU UUIDs allocated to this local job. The implementation escapes commas for the PBS hook environment representation. For a zero-GPU job it is explicitly set to an empty string, preventing accidental CUDA use of unallocated GPUs. |
-| `CUDA_DEVICE_ORDER` | Set to `PCI_BUS_ID` when at least one GPU is allocated. |
+At `execjob_begin`, the hook sums the `ngpus` allocation for all chunks assigned to the local execution host. It inventories physical NVIDIA GPUs and selects the requested number while holding hook state/locking so that concurrent jobs do not receive the same device.
 
-Because UUIDs are used, applications should not assume that the values in `CUDA_VISIBLE_DEVICES` are the node-global numeric GPU indices.
+If a job requests GPUs but the required devices cannot be inventoried or allocated, execution is rejected rather than allowing the job to run without its requested devices.
 
-### Accounting resources
-
-The supplied qmgr file creates two resources:
-
-```qmgr
-create resource gpupercent
-set resource gpupercent type = long
-set resource gpupercent flag = r
-
-create resource gpumemmaxpercent
-set resource gpumemmaxpercent type = long
-set resource gpumemmaxpercent flag = r
-```
-
-Their meanings are:
-
-| Resource | Meaning |
-|---|---|
-| `resources_used.gpupercent` | Running arithmetic mean of the **sum** of instantaneous GPU utilisation percentages across all GPUs allocated to the local job. Range is `0..100*N` for `N` GPUs. |
-| `resources_used.gpumemmaxpercent` | Maximum observed aggregate allocated-GPU memory fraction: `100 * sum(memory.used) / sum(memory.total)`. Range `0..100`. |
-
-For example, if a two-GPU job averages 70% utilisation on one GPU and 60% on the other at sampling times, `gpupercent` can be approximately `130`.
-
-### Restrictions
-
-- Physical NVIDIA GPUs only; no MIG support.
-- GPU allocation is immutable for the lifetime of a job. `execjob_resize` is rejected.
-- A requested GPU job is rejected if `nvidia-smi` cannot provide a usable physical-GPU inventory.
-- The per-job cgroup created by `hook_job_cgroups_v2` must already exist at `execjob_begin`; otherwise the job is rejected.
-- Device isolation failures are fatal. Telemetry failures are non-fatal and only affect accounting data.
-- GPU accounting is **sampled** on `exechost_periodic`; it is not continuous hardware integration. Short jobs can finish before the first sample.
-
-## 3. Technical documentation
-
-### Events and ordering
-
-The supplied qmgr setup enables:
-
-```text
-exechost_periodic
-execjob_begin
-execjob_launch
-execjob_epilogue
-execjob_end
-execjob_abort
-execjob_resize
-```
-
-with periodic frequency `30` seconds and hook order `20`. The source explicitly requires the CPU/memory cgroup hook to execute first on `execjob_begin`.
-
-### GPU inventory and allocation
-
-At begin, `local_ngpus()` sums assigned `ngpus` over local `exec_vnode` chunks. `nvidia-smi` is queried for:
-
-```text
-index, uuid, pci.bus_id, memory.total
-```
-
-The runtime inventory also resolves each GPU's NUMA node, `/dev/nvidiaN` device number, and associated `/dev/dri/card*`/`renderD*` DRM nodes.
-
-Allocation state is persisted below `PBS_MOM_HOME/mom_priv/hooks/<state_subdir>`. Existing state files are used to identify GPU UUIDs already assigned to other jobs. The allocation strategy is:
-
-- `index`: choose the lowest free NVIDIA indices;
-- `numa`: sort free GPUs by `(NUMA node, index)` and choose the first entries.
-
-The current `numa` mode does **not** correlate GPU NUMA placement with the CPU cores selected for the same job; it only changes the ordering of free GPUs.
+The selected devices are persisted by GPU UUID, not merely by volatile CUDA index.
 
 ### Device isolation
 
-When `device_isolation=true`, the hook builds and attaches a minimal eBPF `BPF_PROG_TYPE_CGROUP_DEVICE` program to the existing per-job cgroup. It explicitly matches NVIDIA and associated DRM device major/minor numbers, allowing selected GPUs and rejecting those belonging to unallocated GPUs. Unrelated devices are allowed by default.
+When `device_isolation` is enabled, the hook attaches a cgroup v2 device filter to the existing per-job cgroup. The cgroup itself is owned by `hook_job_cgroups_v2`; this hook neither creates nor destroys the CPU/memory job cgroup.
 
-The implementation contains direct Linux `bpf()` syscall numbers for `x86_64/amd64` and `aarch64/arm64`; other architectures are rejected when device isolation is attempted.
+DRM node access can be adjusted when `manage_drm_acl` is enabled. Device-isolation/allocation failures are treated as execution-critical. Telemetry failures are non-fatal and are logged without killing an otherwise valid job.
 
-### DRM ACL management
+### Environment setup
 
-When `manage_drm_acl=true`, `setfacl` is used to add per-user ACL access to selected DRM nodes and to remove those ACL entries at epilogue/end or stale-state cleanup. `/dev/nvidiaN` access is primarily controlled through the cgroup-device policy.
+At `execjob_launch`, the hook sets `CUDA_VISIBLE_DEVICES` from the UUIDs stored in local job state. This happens for each launched job process/session on the execution host.
 
-### CUDA environment
+### Telemetry and accounting
 
-At `execjob_launch`, the hook loads the persisted allocation and sets `CUDA_VISIBLE_DEVICES` to allocated GPU UUIDs. `CUDA_DEVICE_ORDER=PCI_BUS_ID` is added for GPU jobs.
+When telemetry is enabled, the periodic event samples allocated GPUs through `nvidia-smi` and updates PBS `resources_used` values.
 
-### Telemetry
+The supplied `.qmgr` file defines the following accounting resources:
 
-With `telemetry=true`, each periodic event obtains a single node-wide `nvidia-smi` sample containing:
+| Resource | Type | Flags | Current use |
+| --- | --- | --- | --- |
+| `gpupercent` | `long` | `r` | Populated by the hook as running mean aggregate GPU utilization. |
+| `gpumemmaxpercent` | `long` | `r` | Populated as maximum observed aggregate GPU-memory percentage. |
+| `gpupowerusageavg` | `long` | `r` | Defined in the supplied resource specification for GPU power accounting. |
+| `gpuenergyconsumed` | `long` | `r` | Defined in the supplied resource specification for GPU energy accounting. |
 
-```text
-uuid, utilization.gpu, memory.used, memory.total
-```
+The current Python implementation updates `gpupercent` and `gpumemmaxpercent`. It does not currently write `gpupowerusageavg` or `gpuenergyconsumed`; those two resource definitions are therefore reserved by the supplied configuration but are not populated by this hook version.
 
-For each live GPU job, only rows matching its allocated UUIDs are used. A sample is discarded for that job if any allocated GPU is missing from the sample.
+### Lifecycle
 
-`gpupercent` is the arithmetic mean over periodic samples of the per-sample sum of utilisation values. `gpumemmaxpercent` is the maximum aggregate memory fraction observed over all valid samples. The hook intentionally does not take a final epilogue sample because the GPU workload has normally already exited and such a sample would bias utilisation downward.
+The periodic event also removes stale GPU state for jobs that no longer exist. Epilogue/end/abort events release GPU-related state and access changes. Dynamic GPU resizing is not supported and `execjob_resize` is rejected.
 
-### JSON configuration
+### Dependencies
 
-| Item | Type | Default | Description |
-|---|---:|---:|---|
-| `cgroup_root` | path | `/sys/fs/cgroup/system.slice/pbs-mom.service` | Must match the delegated cgroup root used by `hook_job_cgroups_v2`. |
-| `jobs_subdir` | string | `pbs_jobs` | Must match the job-cgroup subdirectory used by `hook_job_cgroups_v2`. |
-| `state_subdir` | string | `gpu_v2` | State directory below `PBS_MOM_HOME/mom_priv/hooks/`. |
-| `nvidia_smi` | path | `/usr/bin/nvidia-smi` | NVIDIA utility used for inventory and telemetry. |
-| `device_isolation` | boolean | `true` | Attach a cgroup-device BPF policy restricting NVIDIA/DRM device access to the allocated GPUs. |
-| `manage_drm_acl` | boolean | `true` | Add/remove user ACLs on associated `/dev/dri` nodes. |
-| `telemetry` | boolean | `true` | Enable periodic `nvidia-smi` accounting. Allocation and isolation still operate when telemetry is disabled. |
-| `allocation` | string | `index` | GPU selection ordering. `numa` uses `(NUMA,index)` ordering; other values follow index ordering. |
+This hook depends on:
 
-### Limitations and design notes
+- `ngpus`, discovered/published by `hook_discovery_gpus` and allocated by PBS;
+- a working NVIDIA driver and configured `nvidia-smi`;
+- the job cgroup created by `hook_job_cgroups_v2` when device isolation is enabled.
 
-- This hook assumes GPU allocation is exclusively coordinated through its persistent state. External allocators changing GPU ownership independently can conflict with that state.
-- Device isolation depends on Linux cgroup v2 and eBPF cgroup-device support and sufficient privileges for BPF program loading/attachment.
-- BPF isolation covers NVIDIA and discovered associated DRM nodes; the program permits unrelated device nodes.
-- The telemetry metric is a simple equally weighted sample mean, so its accuracy depends on `freq` and job duration.
-- `gpumemmaxpercent` is aggregate allocated-GPU memory occupancy, not the maximum occupancy of any single GPU.
-- State cleanup removes stale ACLs/allocation records. The BPF program itself disappears with the job cgroup, whose lifecycle is owned by `hook_job_cgroups_v2`.
+It does not use `gpu_cap`, `gpu_arch`, or `gpu_model` to choose the concrete physical device after scheduling; those resources constrain scheduling before execution.
