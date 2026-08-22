@@ -14,6 +14,6 @@ for HOOK in hook_discovery_node.qmgr  \
             hook_job_env.qmgr; do
     echo ""
     echo "# HOOK: $(basename $HOOK)"
-    qmgr < $HOOK
+    qmgr < hooks/$HOOK
 done
 

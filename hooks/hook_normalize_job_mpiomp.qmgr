@@ -22,6 +22,6 @@ set hook normalize_job_mpiomp order = 10
 set hook normalize_job_mpiomp debug = false
 set hook normalize_job_mpiomp fail_action = none
 
-import hook normalize_job_mpiomp application/x-python default /root/openpbs.hooks/hook_normalize_job_mpiomp.py
+import hook normalize_job_mpiomp application/x-python default /root/openpbs.hooks/hooks/hook_normalize_job_mpiomp.py
 
 

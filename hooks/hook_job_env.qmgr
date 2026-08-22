@@ -19,5 +19,5 @@ set hook job_env order = 40
 set hook job_env debug = false
 set hook job_env fail_action = none
 
-import hook job_env application/x-python default /root/openpbs.hooks/hook_job_env.py
+import hook job_env application/x-python default /root/openpbs.hooks/hooks/hook_job_env.py
 

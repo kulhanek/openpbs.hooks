@@ -23,6 +23,6 @@ set hook job_cgroups_v2 order = 10
 set hook job_cgroups_v2 debug = false
 set hook job_cgroups_v2 fail_action = none
 
-import hook job_cgroups_v2 application/x-python default /root/openpbs.hooks/hook_job_cgroups_v2.py
-import hook job_cgroups_v2 application/x-config default /root/openpbs.hooks/hook_job_cgroups_v2.json
+import hook job_cgroups_v2 application/x-python default /root/openpbs.hooks/hooks/hook_job_cgroups_v2.py
+import hook job_cgroups_v2 application/x-config default /root/openpbs.hooks/hooks/hook_job_cgroups_v2.json
 

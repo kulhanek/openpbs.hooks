@@ -50,5 +50,5 @@ set hook workspace freq = 600
 set hook workspace order = 30
 set hook workspace debug = false
 set hook workspace fail_action = none
-import hook workspace application/x-python default /root/openpbs.hooks/hook_workspace.py
-import hook workspace application/x-config default /root/openpbs.hooks/hook_workspace.json
+import hook workspace application/x-python default /root/openpbs.hooks/hooks/hook_workspace.py
+import hook workspace application/x-config default /root/openpbs.hooks/hooks/hook_workspace.json

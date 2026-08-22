@@ -23,5 +23,5 @@ set hook hook_discovery_containers debug = false
 set hook hook_discovery_containers fail_action = none
 
 # Import the hook implementation and its JSON configuration.
-import hook hook_discovery_containers application/x-python default hook_discovery_containers.py
-import hook hook_discovery_containers application/x-config default hook_discovery_containers.json
+import hook hook_discovery_containers application/x-python default /root/openpbs.hooks/hooks/hook_discovery_containers.py
+import hook hook_discovery_containers application/x-config default /root/openpbs.hooks/hooks/hook_discovery_containers.json

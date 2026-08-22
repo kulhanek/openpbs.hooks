@@ -34,5 +34,5 @@ set hook discovery_node order = 10
 set hook discovery_node debug = false
 set hook discovery_node fail_action = none
 
-import hook discovery_node application/x-python default /root/openpbs.hooks/hook_discovery_node.py
-import hook discovery_node application/x-config default /root/openpbs.hooks/hook_discovery_node.json
+import hook discovery_node application/x-python default /root/openpbs.hooks/hooks/hook_discovery_node.py
+import hook discovery_node application/x-config default /root/openpbs.hooks/hooks/hook_discovery_node.json

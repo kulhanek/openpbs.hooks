@@ -38,5 +38,5 @@ set hook discovery_interconnect order = 40
 set hook discovery_interconnect debug = false
 set hook discovery_interconnect fail_action = none
 
-import hook discovery_interconnect application/x-python default /root/openpbs.hooks/hook_discovery_interconnect.py
-import hook discovery_interconnect application/x-config default /root/openpbs.hooks/hook_discovery_interconnect.json
+import hook discovery_interconnect application/x-python default /root/openpbs.hooks/hooks/hook_discovery_interconnect.py
+import hook discovery_interconnect application/x-config default /root/openpbs.hooks/hooks/hook_discovery_interconnect.json

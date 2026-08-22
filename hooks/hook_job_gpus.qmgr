@@ -45,5 +45,5 @@ set hook job_gpus order = 20
 set hook job_gpus debug = false
 set hook job_gpus fail_action = none
 
-import hook job_gpus application/x-python default /root/openpbs.hooks/hook_job_gpus.py
-import hook job_gpus application/x-config default /root/openpbs.hooks/hook_job_gpus.json
+import hook job_gpus application/x-python default /root/openpbs.hooks/hooks/hook_job_gpus.py
+import hook job_gpus application/x-config default /root/openpbs.hooks/hooks/hook_job_gpus.json
