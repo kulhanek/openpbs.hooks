@@ -16,13 +16,13 @@ The hook has no DCGM or AMS dependency. NVIDIA MIG instances are deliberately no
 |---|---|---|---|
 | `ngpus` | `long` | Number of physical GPUs detected on the vnode. | `ngpus=4` |
 | `gpu_vendor` | `string` | GPU vendor. Currently `nvidia`. | `gpu_vendor=nvidia` |
-| `gpu_model` | `string_array` | Unique GPU model name(s) detected on the vnode. | `gpu_model=NVIDIA GeForce RTX 4090` |
+| `gpu_model` | `string` | GPU model detected on the vnode. GPU-homogeneous hosts are expected. | `gpu_model=NVIDIA GeForce RTX 4090` |
 | `gpu_cap` | `string_array` | Native vendor-specific GPU capability. NVIDIA compute capability is normalized to `sm_XX`, e.g. `8.9` becomes `sm_89`. | `gpu_cap=sm_89` |
 | `gpu_arch` | `string_array` | GPU architecture derived from `gpu_cap` through the vendor-specific JSON mapping. | `gpu_arch=ada` |
 | `gpu_mem` | `size` | Total framebuffer memory available on one physical GPU, published in PBS `kb`. The minimum value across detected GPUs is used. | `gpu_mem=49140mb` |
-| `cuda_version` | `string` | Maximum CUDA version reported by the installed NVIDIA driver. | `cuda_version=13.0` |
+| `cuda_version` | `string_array` | Maximum CUDA version reported by the installed NVIDIA driver. Normally contains one value. | `cuda_version=13.0` |
 
-`gpu_cap` and `gpu_arch` are deliberately defined as `string_array`. Current deployment assumes GPU-homogeneous hosts, so each normally contains exactly one value. Keeping them as arrays leaves room for future scheduling semantics without changing the resource types.
+`gpu_cap`, `gpu_arch`, and `cuda_version` are defined as `string_array`. Current deployment assumes GPU-homogeneous hosts, so each normally contains exactly one value. `gpu_model` is a scalar `string`; if multiple distinct models are unexpectedly detected, the hook logs a warning and publishes the lexicographically first model.
 
 For NVIDIA the relationship is intentionally simple:
 
@@ -68,7 +68,7 @@ A model-specific request can also be used if desired by site policy:
 - If the configured NVIDIA discovery executable is absent, the hook publishes `ngpus=0` and clears all descriptive GPU properties.
 - On older NVIDIA drivers where the `compute_cap` query field is unsupported, model/count/memory discovery continues through a fallback query, but `gpu_cap` and therefore `gpu_arch` remain unset.
 - `gpu_mem` describes memory of one physical GPU, not aggregate framebuffer memory across all GPUs on the vnode. The minimum detected value is published.
-- GPU-homogeneous hosts are expected. The implementation still de-duplicates values before publishing string-array resources.
+- GPU-homogeneous hosts are expected. The implementation de-duplicates array-valued resources before publishing them. If multiple distinct GPU models are unexpectedly detected, it logs a warning and publishes one deterministic scalar `gpu_model` value.
 
 ## 3. Technical documentation
 
@@ -115,7 +115,7 @@ nvidia-smi --query-gpu=index,name,compute_cap,memory.total --format=csv,noheader
 
 For every successfully parsed physical GPU row it collects:
 
-- model name,
+- model name (published as the scalar `gpu_model` resource),
 - compute capability,
 - framebuffer memory.
 
@@ -151,7 +151,7 @@ This preserves `ngpus`, `gpu_vendor`, `gpu_model`, and `gpu_mem` discovery, whil
 
 `memory.total` is reported by `nvidia-smi` in MiB with `nounits`; the hook converts it to KiB by multiplying by 1024 and publishes it with the PBS `kb` suffix.
 
-The hook separately executes ordinary `nvidia-smi` output and extracts the `CUDA Version:` field for `cuda_version`.
+The hook separately executes ordinary `nvidia-smi` output and extracts the `CUDA Version:` field for `cuda_version`. Although this discovery currently produces one version, it is published through a `string_array` resource.
 
 ### Publishing and stale values
 
@@ -184,11 +184,11 @@ The supplied qmgr setup defines:
 ```text
 ngpus        : long
 gpu_vendor   : string
-gpu_model    : string_array
+gpu_model    : string
 gpu_cap      : string_array
 gpu_arch     : string_array
 gpu_mem      : size
-cuda_version : string
+cuda_version : string_array
 ```
 
 It also creates and configures the `discovery_gpus` hook for `exechost_startup` and `exechost_periodic`, then imports the Python hook and JSON configuration.

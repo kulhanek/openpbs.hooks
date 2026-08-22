@@ -1,4 +1,6 @@
 {
+    "use_compatible_gpu_cap": false,
+    "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
     "vendors": {
         "nvidia": {
             "enabled": true,

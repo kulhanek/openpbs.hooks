@@ -10,16 +10,16 @@ Published vnode resources
 -------------------------
 * ngpus        : number of physical GPUs
 * gpu_vendor   : GPU vendor (currently "nvidia")
-* gpu_model    : unique GPU model name(s)
+* gpu_model    : GPU model name
 * gpu_cap      : native GPU capability, e.g. sm_89
 * gpu_arch     : architecture derived from gpu_cap, e.g. ada
 * gpu_mem      : minimum total framebuffer memory per physical GPU, in PBS kb
-* cuda_version : maximum CUDA version reported by the NVIDIA driver
+* cuda_version : maximum CUDA version reported by the NVIDIA driver (string_array)
 
 The vendor-specific discovery configuration is stored below "vendors" in the
-hook JSON configuration.  gpu_cap and gpu_arch are string_array resources even
-though GPU-homogeneous hosts are expected and therefore normally publish one
-value only.
+hook JSON configuration. gpu_cap, gpu_arch, and cuda_version are string_array
+resources. GPU-homogeneous hosts are expected, so gpu_model is a scalar string
+and the array-valued resources normally publish one value only.
 
 No ams-host dependency is used. NVIDIA discovery uses nvidia-smi only.
 MIG instances are deliberately ignored: ngpus counts physical GPUs.
@@ -30,12 +30,12 @@ Recommended events
 
 Suggested custom PBS resources
 ------------------------------
+    gpu_mem      : size
     gpu_vendor   : string
-    gpu_model    : string_array
+    gpu_model    : string
     gpu_cap      : string_array
     gpu_arch     : string_array
-    gpu_mem      : size
-    cuda_version : string
+    cuda_version : string_array
 """
 
 import json
@@ -127,8 +127,24 @@ def run(cmd):
     return proc.returncode, out, err
 
 
+def unique_values(values):
+    return sorted(set(str(v).strip() for v in values if str(v).strip()))
+
+
 def joined(values):
-    return ",".join(sorted(set(str(v).strip() for v in values if str(v).strip())))
+    return ",".join(unique_values(values))
+
+
+def scalar(values, resource_name):
+    """Return one scalar value for a resource expected to be homogeneous."""
+    values = unique_values(values)
+    if not values:
+        return ""
+    if len(values) > 1:
+        log(pbs.EVENT_WARNING,
+            "multiple values detected for scalar resource %s: %s; using %s" %
+            (resource_name, ",".join(values), values[0]))
+    return values[0]
 
 
 def nvidia_capability(value):
@@ -238,11 +254,11 @@ class NvidiaDiscovery(object):
         return {
             "ngpus": count,
             "gpu_vendor": "nvidia" if count else "",
-            "gpu_model": joined(models),
+            "gpu_model": scalar(models, "gpu_model"),
             "gpu_cap": joined(capabilities),
             "gpu_arch": joined(architectures),
             "gpu_mem": min(memory_kb) if memory_kb else None,
-            "cuda_version": self._cuda_version(),
+            "cuda_version": joined([self._cuda_version()]),
         }
 
 

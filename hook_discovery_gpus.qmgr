@@ -8,29 +8,29 @@ create resource ngpus
 set resource ngpus type = long
 set resource ngpus flag = hn
 
+create resource gpu_mem
+set resource gpu_mem type = size
+set resource gpu_mem flag = hl
+
 create resource gpu_vendor
 set resource gpu_vendor type = string
 set resource gpu_vendor flag = h
 
 create resource gpu_model
-set resource gpu_model type = string_array
+set resource gpu_model type = string
 set resource gpu_model flag = h
 
 create resource gpu_cap
 set resource gpu_cap type = string_array
-set resource gpu_cap flag = h
+set resource gpu_cap flag = ho
 
 create resource gpu_arch
 set resource gpu_arch type = string_array
-set resource gpu_arch flag = h
-
-create resource gpu_mem
-set resource gpu_mem type = size
-set resource gpu_mem flag = h
+set resource gpu_arch flag = ho
 
 create resource cuda_version
-set resource cuda_version type = string
-set resource cuda_version flag = h
+set resource cuda_version type = string_array
+set resource cuda_version flag = ho
 
 # hook -------------------------------------------
 
