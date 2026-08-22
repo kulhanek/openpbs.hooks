@@ -1,27 +1,21 @@
 # ---------------------------------------------------------------------------
-# CPU request normalization / MPI+OpenMP validation
+# gpu_cap normalization
 # ---------------------------------------------------------------------------
-
-# resources --------------------------------------
-
-# Preserve the select expression as submitted before hook normalization.
-# This is metadata only; do not add original_select to sched_config resources.
-
-create resource original_select
-set resource original_select type = string 
 
 # hook -------------------------------------------
 
-create hook job_enqueued
-set hook job_enqueued type = site
-set hook job_enqueued enabled = true
-set hook job_enqueued event = queuejob
-set hook job_enqueued user = pbsadmin
-set hook job_enqueued alarm = 30
-set hook job_enqueued order = 10
-set hook job_enqueued debug = false
-set hook job_enqueued fail_action = none
+create hook normalize_job_gpucap
+set hook normalize_job_gpucap type = site
+set hook normalize_job_gpucap enabled = true
+set hook normalize_job_gpucap event = queuejob
+set hook normalize_job_gpucap user = pbsadmin
+set hook normalize_job_gpucap alarm = 30
+set hook normalize_job_gpucap order = 10
+set hook normalize_job_gpucap debug = false
+set hook normalize_job_gpucap fail_action = none
 
-import hook job_enqueued application/x-python default /root/openpbs.hooks/hook_job_enqueued.py
+import hook normalize_job_gpucap application/x-python default /root/openpbs.hooks/hook_normalize_job_gpucap.py
 
+# the configuration is shared with hook_discovery_gpus
+import hook normalize_job_gpucap application/x-config default /root/openpbs.hooks/hook_discovery_gpus.json
 
