@@ -10,7 +10,7 @@ set resource interconnect flag = h
 
 create resource interconnect_speed
 set resource interconnect_speed type = long
-set resource interconnect_speed flag = h
+set resource interconnect_speed flag = hl
 
 create resource rdma
 set resource rdma type = boolean
@@ -18,11 +18,11 @@ set resource rdma flag = h
 
 create resource eth_speed
 set resource eth_speed type = long
-set resource eth_speed flag = h
+set resource eth_speed flag = hl
 
 create resource ib_speed
 set resource ib_speed type = long
-set resource ib_speed flag = h
+set resource ib_speed flag = hl
 
 # hook -------------------------------------------
 
