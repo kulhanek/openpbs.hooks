@@ -12,16 +12,16 @@ set resource original_select type = string
 
 # hook -------------------------------------------
 
-create hook normalize_job_mpiomp
-set hook normalize_job_mpiomp type = site
-set hook normalize_job_mpiomp enabled = true
-set hook normalize_job_mpiomp event = queuejob
-set hook normalize_job_mpiomp user = pbsadmin
-set hook normalize_job_mpiomp alarm = 30
-set hook normalize_job_mpiomp order = 10
-set hook normalize_job_mpiomp debug = false
-set hook normalize_job_mpiomp fail_action = none
+create hook job_enqueued
+set hook job_enqueued type = site
+set hook job_enqueued enabled = true
+set hook job_enqueued event = queuejob
+set hook job_enqueued user = pbsadmin
+set hook job_enqueued alarm = 30
+set hook job_enqueued order = 10
+set hook job_enqueued debug = false
+set hook job_enqueued fail_action = none
 
-import hook normalize_job_mpiomp application/x-python default /root/openpbs.hooks/hook_normalize_job_mpiomp.py
+import hook job_enqueued application/x-python default /root/openpbs.hooks/hook_job_enqueued.py
 
 
