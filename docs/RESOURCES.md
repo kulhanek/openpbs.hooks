@@ -20,10 +20,10 @@ For custom resources, **Type** and **Flags** are taken from the supplied `.qmgr`
 | `gpu_model` | `string` | `h` | GPU model identifier. | [`hook_discovery_gpus`](hook_discovery_gpus.md) (sets) |
 | `gpu_mem` | `size` | `hl` | Per-GPU framebuffer capacity advertised by the vnode; for multiple GPUs the minimum detected capacity is published. | [`hook_discovery_gpus`](hook_discovery_gpus.md) (sets) |
 | `gpu_vendor` | `string` | `h` | GPU vendor identifier; currently `nvidia`. | [`hook_discovery_gpus`](hook_discovery_gpus.md) (sets) |
-| `gpuenergyconsumed` | `long` | `r` | Reserved resource for GPU energy-consumption accounting; defined but not currently populated by the hook implementation. | [`hook_job_gpus`](hook_job_gpus.md) (defines/reserves) |
+| `gpuenergyconsumed` | `long` | `r` | Estimated GPU energy consumed by the local job allocation, in watt-hours (Wh), obtained by integrating summed GPU power over elapsed time. | [`hook_job_gpus`](hook_job_gpus.md) (sets accounting value) |
 | `gpumemmaxpercent` | `long` | `r` | Maximum observed aggregate percentage of allocated GPU framebuffer memory in use. | [`hook_job_gpus`](hook_job_gpus.md) (sets accounting value) |
 | `gpupercent` | `long` | `r` | Running mean of aggregate GPU utilization across GPUs allocated on the local host. | [`hook_job_gpus`](hook_job_gpus.md) (sets accounting value) |
-| `gpupowerusageavg` | `long` | `r` | Reserved resource for average GPU power accounting; defined but not currently populated by the hook implementation. | [`hook_job_gpus`](hook_job_gpus.md) (defines/reserves) |
+| `gpupowerusageavg` | `long` | `r` | Running mean of the summed instantaneous GPU power draw across GPUs allocated on the local host, in watts. | [`hook_job_gpus`](hook_job_gpus.md) (sets accounting value) |
 | `hybrid_cpu` | `boolean` | `h` | Indicates an asymmetric/hybrid SMT topology where physical cores expose different numbers of logical CPUs. | [`hook_discovery_cpus`](hook_discovery_cpus.md) (sets) |
 | `ib_speed` | `long` | `hl` | Maximum detected native InfiniBand link speed in Mb/s. | [`hook_discovery_interconnect`](hook_discovery_interconnect.md) (sets) |
 | `interconnect` | `string_array` | `h` | Detected interconnect classes such as `ethernet`, `ib`, and `roce`. | [`hook_discovery_interconnect`](hook_discovery_interconnect.md) (sets) |
