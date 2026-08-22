@@ -9,6 +9,6 @@ The hooks were tested on **Ubuntu 24.04** and are designed to work with the **cg
 * The hooks use some OpenPBS resources with non-standard flags (*hl*, *hu*, *ho*, *ha*), which are implemented in the [modified version of OpenPBS](https://github.com/kulhanek/openpbs).
 
 ## Contents
-* [Hooks](HOOKS.md)
-* [Resources](RESOURCES.md)
+* [Hooks](docs/HOOKS.md)
+* [Resources](docs/RESOURCES.md)
 
