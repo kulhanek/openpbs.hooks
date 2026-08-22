@@ -2,7 +2,7 @@
 
 ## Overview
 
-`hook_job_gpus` turns a scheduled `ngpus` allocation into a concrete set of NVIDIA devices on each execution host. It tracks device ownership, attaches GPU device isolation to the cgroup created by `hook_job_cgroups_v2`, sets CUDA visibility for launched processes, and records lightweight GPU usage accounting.
+`hook_job_gpus` turns a scheduled `ngpus` allocation into a concrete set of NVIDIA devices on each execution host. It tracks device ownership, attaches GPU device isolation to the cgroup created by `hook_job_cgroups_v2`, sets CUDA visibility for launched processes, and records lightweight GPU usage, memory, power, and energy accounting.
 
 The current implementation supports whole physical NVIDIA GPUs. MIG devices are not supported.
 
@@ -23,12 +23,16 @@ At process launch the hook sets:
 
 A job requesting no GPUs receives an empty CUDA visibility setting so that it does not accidentally use GPUs that were not allocated to it.
 
-GPU usage is reported in PBS accounting while the job runs. In the current implementation:
+GPU usage is reported in PBS accounting while the job runs:
 
-- `resources_used.gpupercent` is a running arithmetic mean of the summed utilization percentages of all GPUs allocated on the local host; for multiple GPUs it can therefore exceed 100;
-- `resources_used.gpumemmaxpercent` is the maximum observed aggregate fraction of allocated GPU framebuffer memory in use and is in the range 0-100.
+| Resource | Meaning |
+| --- | --- |
+| `resources_used.gpupercent` | Running arithmetic mean of the sum of instantaneous GPU-utilization percentages across all GPUs allocated on the local host. For `N` GPUs the range is `0..100*N`. |
+| `resources_used.gpumemmaxpercent` | Maximum observed aggregate fraction of allocated GPU framebuffer memory in use: `100 * sum(memory.used) / sum(memory.total)`. Range `0..100`. |
+| `resources_used.gpupowerusageavg` | Running arithmetic mean of the summed instantaneous `power.draw` of all allocated GPUs, in watts. |
+| `resources_used.gpuenergyconsumed` | Estimated energy consumed by the allocated GPUs, in watt-hours (Wh), obtained by integrating sampled GPU power over elapsed wall-clock time. |
 
-GPU telemetry is intentionally lightweight and periodic, so these values are samples rather than a full high-frequency performance trace.
+GPU telemetry is intentionally lightweight and periodic. The values are therefore accounting estimates based on `nvidia-smi` samples rather than a high-frequency performance or power trace. Because the supplied resource definitions use PBS type `long`, power and energy values are rounded to whole watts and whole watt-hours when written to `resources_used`.
 
 ## Technical and administration documentation
 
@@ -48,7 +52,7 @@ The periodic interval is 30 seconds and the hook order is 20. `hook_job_cgroups_
 
 ### Configuration
 
-The supplied JSON configuration is based on:
+The supplied JSON configuration is:
 
 ```json
 {
@@ -71,8 +75,8 @@ The supplied JSON configuration is based on:
 | `nvidia_smi` | Absolute path to `nvidia-smi`. |
 | `device_isolation` | Enable cgroup-v2 GPU device isolation. |
 | `manage_drm_acl` | Manage access to related DRM device nodes when required. |
-| `telemetry` | Enable periodic GPU utilization/memory sampling. |
-| `allocation` | Physical-GPU selection policy. The implementation supports index-based allocation and topology-aware/NUMA selection where configured. |
+| `telemetry` | Enable periodic GPU utilization, memory, power, and energy accounting. |
+| `allocation` | Physical-GPU selection policy. The implementation supports index-based allocation and NUMA-based ordering. |
 
 ### Device allocation
 
@@ -94,18 +98,64 @@ At `execjob_launch`, the hook sets `CUDA_VISIBLE_DEVICES` from the UUIDs stored 
 
 ### Telemetry and accounting
 
-When telemetry is enabled, the periodic event samples allocated GPUs through `nvidia-smi` and updates PBS `resources_used` values.
+When telemetry is enabled, each periodic event obtains one node-wide `nvidia-smi` sample containing:
 
-The supplied `.qmgr` file defines the following accounting resources:
+```text
+uuid, utilization.gpu, memory.used, memory.total, power.draw
+```
 
-| Resource | Type | Flags | Current use |
+For each live GPU job, only rows matching its allocated UUIDs are used. If any allocated GPU is missing from the sample, that sample is discarded for the job.
+
+The supplied `.qmgr` file defines:
+
+| Resource | Type | Flags | Populated value |
 | --- | --- | --- | --- |
-| `gpupercent` | `long` | `r` | Populated by the hook as running mean aggregate GPU utilization. |
-| `gpumemmaxpercent` | `long` | `r` | Populated as maximum observed aggregate GPU-memory percentage. |
-| `gpupowerusageavg` | `long` | `r` | Defined in the supplied resource specification for GPU power accounting. |
-| `gpuenergyconsumed` | `long` | `r` | Defined in the supplied resource specification for GPU energy accounting. |
+| `gpupercent` | `long` | `r` | Running mean of summed GPU utilization percentages. |
+| `gpumemmaxpercent` | `long` | `r` | Maximum observed aggregate GPU-memory percentage. |
+| `gpupowerusageavg` | `long` | `r` | Running mean of summed GPU power draw, in W. |
+| `gpuenergyconsumed` | `long` | `r` | Integrated GPU energy consumption, in Wh. |
 
-The current Python implementation updates `gpupercent` and `gpumemmaxpercent`. It does not currently write `gpupowerusageavg` or `gpuenergyconsumed`; those two resource definitions are therefore reserved by the supplied configuration but are not populated by this hook version.
+#### GPU utilization
+
+For every valid sample, the hook sums `utilization.gpu` over all GPUs allocated to the local job. `gpupercent` is the arithmetic mean of these per-sample sums.
+
+#### GPU memory
+
+The hook computes:
+
+```text
+100 * sum(memory.used) / sum(memory.total)
+```
+
+for the allocated GPUs and retains the maximum observed value as `gpumemmaxpercent`.
+
+#### GPU power
+
+If `power.draw` is available for every allocated GPU, their instantaneous power values are summed. `gpupowerusageavg` is the arithmetic mean of these summed power samples. Therefore it represents average total GPU power for the local allocation, not average power per GPU.
+
+If `power.draw` is unsupported or reported as `N/A`, utilization and memory accounting remain valid; only power and energy accounting are skipped for that sample.
+
+#### GPU energy
+
+`gpuenergyconsumed` is accumulated internally in Wh from the summed power samples. The first valid power sample is treated as representative from job creation until that sample. Subsequent intervals use trapezoidal integration between the previous and current total-power samples:
+
+```text
+energy += 0.5 * (previous_power + current_power) * elapsed_seconds / 3600
+```
+
+The accumulated floating-point energy is persisted in the hook state, while the PBS `long` resource receives the rounded whole-Wh value.
+
+The hook intentionally does not take a final epilogue sample because the GPU workload has normally exited by then; such a sample would bias utilization and average power downward.
+
+### Persistent state
+
+Per-job state below `<PBS_MOM_HOME>/mom_priv/hooks/<state_subdir>/` includes the allocated GPU inventory and telemetry accumulators. In addition to utilization and memory state, power accounting persists:
+
+- sum and count of valid power samples;
+- accumulated energy in Wh;
+- previous power value and timestamp used for integration.
+
+This allows periodic hook invocations to continue the running averages and energy integral.
 
 ### Lifecycle
 
@@ -117,6 +167,7 @@ This hook depends on:
 
 - `ngpus`, discovered/published by `hook_discovery_gpus` and allocated by PBS;
 - a working NVIDIA driver and configured `nvidia-smi`;
+- `power.draw` support for power/energy accounting;
 - the job cgroup created by `hook_job_cgroups_v2` when device isolation is enabled.
 
 It does not use `gpu_cap`, `gpu_arch`, or `gpu_model` to choose the concrete physical device after scheduling; those resources constrain scheduling before execution.

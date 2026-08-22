@@ -23,6 +23,14 @@ PBS resources expected for accounting
     set resource gpumemmaxpercent type = long
     set resource gpumemmaxpercent flag = r
 
+    create resource gpupowerusageavg
+    set resource gpupowerusageavg type = long
+    set resource gpupowerusageavg flag = r
+
+    create resource gpuenergyconsumed
+    set resource gpuenergyconsumed type = long
+    set resource gpuenergyconsumed flag = r
+
 Events to enable
 ----------------
     exechost_periodic, execjob_begin, execjob_launch,
@@ -254,11 +262,11 @@ class NvidiaRuntime(object):
         return gpus
 
     def telemetry(self):
-        """Return UUID -> instantaneous utilization and memory usage."""
+        """Return UUID -> instantaneous utilization, memory use, and power."""
         if not self.available():
             return {}
         cmd = [self.cfg["nvidia_smi"],
-               "--query-gpu=uuid,utilization.gpu,memory.used,memory.total",
+               "--query-gpu=uuid,utilization.gpu,memory.used,memory.total,power.draw",
                "--format=csv,noheader,nounits"]
         rc, out, err = run(cmd)
         if rc != 0:
@@ -267,17 +275,29 @@ class NvidiaRuntime(object):
         values = {}
         for raw in out.splitlines():
             parts = [x.strip() for x in raw.split(",")]
-            if len(parts) != 4:
+            if len(parts) != 5:
                 continue
             try:
-                values[parts[0]] = {
-                    "util": float(parts[1]),
-                    "mem_used": float(parts[2]),
-                    "mem_total": float(parts[3]),
-                }
+                util = float(parts[1])
+                mem_used = float(parts[2])
+                mem_total = float(parts[3])
             except (TypeError, ValueError):
-                # Some drivers report N/A for unsupported telemetry fields.
+                # Utilization/memory are required for a valid telemetry row.
                 continue
+
+            try:
+                power_w = float(parts[4])
+            except (TypeError, ValueError):
+                # Some GPUs/drivers report N/A for power.draw.  Keep the
+                # utilization/memory sample usable and omit power accounting.
+                power_w = None
+
+            values[parts[0]] = {
+                "util": util,
+                "mem_used": mem_used,
+                "mem_total": mem_total,
+                "power_w": power_w,
+            }
         return values
 
 
@@ -574,6 +594,14 @@ class GpuHook(object):
 
         gpumemmaxpercent is the maximum observed aggregate memory fraction:
         100 * sum(memory.used) / sum(memory.total), range 0..100.
+
+        gpupowerusageavg is the running arithmetic mean of the sum of
+        instantaneous power.draw values, in watts, across the allocated GPUs.
+
+        gpuenergyconsumed is the accumulated energy in watt-hours.  Power is
+        integrated over elapsed wall-clock time.  The first valid power sample
+        is assumed representative from job creation until that sample; later
+        intervals use trapezoidal integration between consecutive samples.
         """
         uuids = [g.get("uuid") for g in state.get("gpus", []) if g.get("uuid")]
         if not uuids:
@@ -586,6 +614,7 @@ class GpuHook(object):
                 (job.id, missing))
             return False
 
+        now = time.time()
         util_sum = sum(float(row["util"]) for row in rows)
         mem_used = sum(float(row["mem_used"]) for row in rows)
         mem_total = sum(float(row["mem_total"]) for row in rows)
@@ -595,12 +624,41 @@ class GpuHook(object):
         state["gpu_samples"] = int(state.get("gpu_samples", 0)) + 1
         state["gpu_mem_peak_pct"] = max(float(state.get("gpu_mem_peak_pct", 0.0)),
                                          mem_pct)
-        state["telemetry_updated"] = time.time()
+        state["telemetry_updated"] = now
 
         gpupercent = int(round(state["gpu_util_sum"] / state["gpu_samples"]))
         gpumemmaxpercent = int(round(state["gpu_mem_peak_pct"]))
         set_resource_used(job, "gpupercent", gpupercent)
         set_resource_used(job, "gpumemmaxpercent", gpumemmaxpercent)
+
+        # Keep power accounting independent from utilization/memory accounting:
+        # unsupported power.draw must not discard otherwise valid telemetry.
+        if all(row.get("power_w") is not None for row in rows):
+            power_w = sum(float(row["power_w"]) for row in rows)
+            power_samples = int(state.get("gpu_power_samples", 0))
+            state["gpu_power_sum_w"] = float(state.get("gpu_power_sum_w", 0.0)) + power_w
+            state["gpu_power_samples"] = power_samples + 1
+
+            previous_time = state.get("gpu_last_power_time")
+            previous_power = state.get("gpu_last_power_w")
+            if previous_time is None or previous_power is None:
+                previous_time = float(state.get("created", now))
+                previous_power = power_w
+
+            elapsed = max(0.0, now - float(previous_time))
+            state["gpu_energy_wh"] = float(state.get("gpu_energy_wh", 0.0)) + (
+                0.5 * (float(previous_power) + power_w) * elapsed / 3600.0
+            )
+            state["gpu_last_power_time"] = now
+            state["gpu_last_power_w"] = power_w
+
+            gpupowerusageavg = int(round(
+                state["gpu_power_sum_w"] / state["gpu_power_samples"]
+            ))
+            gpuenergyconsumed = int(round(state["gpu_energy_wh"]))
+            set_resource_used(job, "gpupowerusageavg", gpupowerusageavg)
+            set_resource_used(job, "gpuenergyconsumed", gpuenergyconsumed)
+
         return True
 
     def begin(self, e):
@@ -634,6 +692,11 @@ class GpuHook(object):
                 "gpu_util_sum": 0.0,
                 "gpu_samples": 0,
                 "gpu_mem_peak_pct": 0.0,
+                "gpu_power_sum_w": 0.0,
+                "gpu_power_samples": 0,
+                "gpu_energy_wh": 0.0,
+                "gpu_last_power_time": None,
+                "gpu_last_power_w": None,
                 "telemetry_updated": None,
             }
             self.state.save(job.id, state)
@@ -641,6 +704,8 @@ class GpuHook(object):
         if selected:
             set_resource_used(job, "gpupercent", 0)
             set_resource_used(job, "gpumemmaxpercent", 0)
+            set_resource_used(job, "gpupowerusageavg", 0)
+            set_resource_used(job, "gpuenergyconsumed", 0)
         log(pbs.EVENT_DEBUG, "job %s allocated GPUs: %s" %
             (job.id, [g["uuid"] for g in selected]))
         return True
