@@ -23,16 +23,17 @@ For a plain TOKEN, compatibility expansion is controlled by
 "use_compatible_gpu_cap".  exact[TOKEN] never expands.  compat[TOKEN] always
 attempts expansion.
 
-Compatibility is derived from the shared vendor-local "architectures" maps.
-Capabilities which map to the same architecture within one vendor are treated
-as compatible alternatives.
+Compatibility is derived from the ordered, vendor-local "architectures" maps.
+For sm_XX, compatibility is forward-only within the same architecture.  For
+compute_XX, compatibility is forward-only within the same vendor regardless
+of architecture.
 
 If "state_file" is configured and readable, only hook-added compatibility
 alternatives are filtered against resources.gpu_cap from that file.  A value
 explicitly requested by the user (after canonicalization such as
 compute_86 -> sm_86) is never removed by state-file filtering.
 
-The final gpu_cap list is sorted and de-duplicated.
+The final gpu_cap list is de-duplicated while preserving compatibility order.
 
 Before modifying Resource_List.select, the hook stores the current select in
 Resource_List.user_select only when user_select is None or empty.  This
@@ -125,14 +126,24 @@ def canonical_token(token):
     return token
 
 
+def token_compatibility_kind(token):
+    """Return the compatibility semantics implied by the user's spelling."""
+    if COMPUTE_RE.match(token):
+        return "compute"
+    return "sm"
+
+
 def parse_user_token(token):
     """
-    Return (mode, canonical_value).
+    Return (mode, canonical_value, compatibility_kind).
 
     mode is one of:
         default - plain token
         exact
         compat
+
+    compatibility_kind preserves whether the user wrote compute_XX or sm_XX,
+    because their compat[] expansion rules differ.
 
     exact[] and compat[] require one non-empty, comma-free inner token.
     Unknown capability names are valid and are left untouched.
@@ -149,14 +160,12 @@ def parse_user_token(token):
             raise ValueError("%s[] requires a non-empty capability" % mode)
         if "," in value:
             raise ValueError("%s[] capability must not contain ','" % mode)
-        return mode, canonical_token(value)
+        return mode, canonical_token(value), token_compatibility_kind(value)
 
-    # A wrapper-like token should not silently pass through if its syntax is
-    # incomplete, because that almost certainly represents a user typo.
     if token.startswith("exact[") or token.startswith("compat["):
         raise ValueError("malformed gpu_cap wrapper: %s" % token)
 
-    return "default", canonical_token(token)
+    return "default", canonical_token(token), token_compatibility_kind(token)
 
 
 def architecture_maps(cfg):
@@ -181,20 +190,31 @@ def architecture_maps(cfg):
     return result
 
 
-def compatible_tokens(cfg, token):
+def compatible_tokens(cfg, token, compatibility_kind):
     """
-    Return configured compatible values for token.
+    Return forward-compatible configured values for token.
 
-    A capability is compatible with all capabilities mapped to the same
-    architecture in the same vendor map.
+    The order of entries in vendors.*.architectures is significant and is
+    assumed to run from oldest to newest capability.
 
-    If the same capability key occurs in more than one vendor namespace, the
-    lookup is ambiguous.  In that case no alternatives are added.
+    sm_XX:
+        start at sm_XX and include only later capabilities with the same
+        architecture in the same vendor.
+
+    compute_XX:
+        start at sm_XX and include every later capability in the same vendor,
+        regardless of architecture.
+
+    If token is absent from the configured maps, no alternatives are added.
+    If it occurs in multiple vendor namespaces, expansion is ambiguous and is
+    skipped.
     """
     matches = []
     for vendor_name, architectures in architecture_maps(cfg):
-        if token in architectures:
-            matches.append((vendor_name, architectures, architectures[token]))
+        keys = [str(value).strip() for value in architectures.keys()]
+        if token in keys:
+            index = keys.index(token)
+            matches.append((vendor_name, architectures, keys, index))
 
     if not matches:
         return []
@@ -205,17 +225,19 @@ def compatible_tokens(cfg, token):
             "compatibility expansion skipped" % token)
         return []
 
-    vendor_name, architectures, architecture = matches[0]
+    vendor_name, architectures, keys, index = matches[0]
+    architecture = architectures.get(token)
     values = []
-    for capability, arch in architectures.items():
-        if arch == architecture:
-            capability = str(capability).strip()
-            if capability:
-                values.append(capability)
+
+    for capability in keys[index:]:
+        if compatibility_kind == "sm" and architectures.get(capability) != architecture:
+            continue
+        if capability:
+            values.append(capability)
 
     log(pbs.EVENT_DEBUG3,
-        "compatibility lookup %s/%s -> %s" %
-        (vendor_name, token, ",".join(sorted(set(values)))))
+        "compatibility lookup %s/%s/%s -> %s" %
+        (vendor_name, compatibility_kind, token, ",".join(values)))
     return values
 
 
@@ -276,16 +298,20 @@ def normalize_gpu_cap(value, cfg, cluster_caps=None):
 
     User/canonical values and hook-added alternatives are tracked separately so
     state-file filtering can never remove a value requested by the user.
+    Output order follows the user request and the configured capability order.
     """
     raw_tokens = str(value).split(",")
-    user_values = set()
-    added_values = set()
+    result = []
+    seen = set()
 
     expand_plain = bool(cfg.get("use_compatible_gpu_cap", False))
 
     for raw in raw_tokens:
-        mode, token = parse_user_token(raw)
-        user_values.add(token)
+        mode, token, compatibility_kind = parse_user_token(raw)
+
+        if token not in seen:
+            result.append(token)
+            seen.add(token)
 
         expand = (mode == "compat") or (
             mode == "default" and expand_plain
@@ -294,16 +320,17 @@ def normalize_gpu_cap(value, cfg, cluster_caps=None):
         if not expand:
             continue
 
-        for alternative in compatible_tokens(cfg, token):
+        for alternative in compatible_tokens(
+                cfg, token, compatibility_kind):
             alternative = str(alternative).strip()
-            if alternative and alternative != token:
-                added_values.add(alternative)
+            if not alternative or alternative == token:
+                continue
+            if cluster_caps is not None and alternative not in cluster_caps:
+                continue
+            if alternative not in seen:
+                result.append(alternative)
+                seen.add(alternative)
 
-    # Only hook-added compatibility alternatives are inventory-filtered.
-    if cluster_caps is not None:
-        added_values.intersection_update(cluster_caps)
-
-    result = sorted(user_values | added_values)
     return ",".join(result)
 
 
