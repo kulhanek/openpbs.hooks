@@ -11,7 +11,7 @@ set hook aggregate_resources enabled = true
 set hook aggregate_resources event = periodic
 set hook aggregate_resources user = pbsadmin
 set hook aggregate_resources alarm = 30
-set hook aggregate_resources freq = 300
+set hook aggregate_resources freq = 8000
 set hook aggregate_resources debug = false
 set hook aggregate_resources fail_action = none
 

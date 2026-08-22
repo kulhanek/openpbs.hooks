@@ -2,228 +2,82 @@
 
 ## Overview
 
-`hook_aggregate_resources` is an OpenPBS server-periodic hook that builds
-cluster-wide lists from vnode resources and stores them in a generated JSON
-state file below `PBS_HOME`.
+`hook_aggregate_resources` is a periodic server-side hook that collects selected vnode resource values from the cluster and writes a compact JSON summary into the PBS private directory. It is intended to provide other hooks or administrative tooling with a cluster-wide view of values such as GPU compute capabilities and CPU ISA levels.
 
-This version does **not** modify `server.resources_available` and therefore
-does not invoke `qmgr`.
+The hook does not create or modify PBS resources and does not change job scheduling directly.
 
-The generated file is intended as shared state for other server-side hooks,
-such as a `queuejob` hook that normalizes submitted resource requests.
+## User documentation
 
-## Configuration
+Regular users do not interact with this hook directly. It does not add job submission options, modify jobs, or change the resources assigned to jobs.
 
-The supplied configuration is:
+Its effect is indirect: other hooks may use the generated cluster-wide resource summary when normalizing or validating user requests. For example, `hook_normalize_job_gpucap` can use the aggregated `gpu_cap` values to avoid adding compatibility alternatives that do not exist anywhere in the cluster.
+
+No user action is required.
+
+## Technical and administration documentation
+
+### Hook events
+
+The supplied `hook_aggregate_resources.qmgr` installs the hook as a `periodic` server hook. The default configuration runs it every 8000 seconds.
+
+### Configuration
+
+The hook reads its JSON configuration from the PBS hook configuration file. The supplied configuration is:
 
 ```json
 {
     "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
-    "collections": [
-        {
-            "source": "gpu_cap"
-        },
-        {
-            "source": "cpu_isa"
-        }
+    "sources": [
+        "gpu_cap",
+        "cpu_isa"
     ]
 }
 ```
 
-### `state_file`
+Configuration fields:
 
-`state_file` is interpreted relative to `PBS_HOME`.
+| Field | Description |
+| --- | --- |
+| `state_file` | Output JSON file. A relative path is resolved below `PBS_HOME`; an absolute path is also accepted. |
+| `sources` | Non-empty list of vnode resource names to aggregate. Duplicate names are ignored after their first occurrence. |
 
-For example, with:
+Each source value is converted to a string and split on commas. Empty items are discarded, duplicate items are removed, and the resulting values are sorted.
 
-```text
-PBS_HOME=/var/spool/pbs
-```
+### Output file
 
-the default setting:
-
-```text
-server_priv/hooks/hook_data/aggregate_resources.json
-```
-
-resolves to:
-
-```text
-/var/spool/pbs/server_priv/hooks/hook_data/aggregate_resources.json
-```
-
-The path must be relative. Absolute paths are rejected.
-
-After canonicalization, the resulting path must remain inside `PBS_HOME`;
-paths using `..` to escape the PBS tree are rejected.
-
-### `collections`
-
-Each collection contains one vnode `resources_available` resource name:
+A typical output file has the following structure:
 
 ```json
 {
-    "source": "gpu_cap"
-}
-```
-
-The source name is also used as the key in the generated JSON file.
-
-## Generated state file
-
-A typical generated file is:
-
-```json
-{
-    "generated": 1787331180,
+    "generated": 1787333315,
     "resources": {
         "cpu_isa": [
-            "x86-64-v3",
-            "x86-64-v4"
+            "x86-64-v2",
+            "x86-64-v3"
         ],
         "gpu_cap": [
-            "sm_80",
-            "sm_89",
-            "sm_90"
+            "sm_61",
+            "sm_86",
+            "sm_89"
         ]
     },
     "version": 1
 }
 ```
 
-The `resources` object is the stable interface intended for consuming hooks.
+`generated` is a Unix timestamp. The file is rewritten on every successful periodic run. The hook creates the parent directory when necessary, writes through a temporary file, calls `fsync()`, sets mode `0644`, and atomically replaces the previous state file.
 
-A `queuejob` hook can therefore read:
+### PBS resources
 
-```python
-data["resources"]["gpu_cap"]
-data["resources"]["cpu_isa"]
-```
+This hook defines no PBS resources of its own. It reads vnode resources named in `sources`. With the supplied configuration these are:
 
-## Collection semantics
+| Resource | Produced by |
+| --- | --- |
+| `gpu_cap` | `hook_discovery_gpus` |
+| `cpu_isa` | `hook_discovery_cpus` |
 
-All vnodes in `pbs.event().vnode_list` are considered regardless of vnode
-state.
+If a configured source is absent on a vnode, that vnode simply contributes no value for that source.
 
-Only `string` and `string_array` source resources are collected.
+### Failure behavior
 
-Other types are silently skipped.
-
-Unset values on individual vnodes are ignored.
-
-Every string-array member is converted to a plain Python string before
-deduplication:
-
-```python
-str(item).strip()
-```
-
-This avoids duplicate textual values caused by PBS-specific Python wrapper
-objects.
-
-The resulting values are unique and lexically sorted.
-
-## Change-only writes
-
-The hook reads the existing state file and compares only:
-
-```json
-"resources"
-```
-
-with the newly collected resource mapping.
-
-If the resource data is unchanged, the hook does not rewrite the file.
-
-The `generated` timestamp therefore changes only when the aggregate content
-changes.
-
-This avoids unnecessary filesystem activity and provides a meaningful
-generation timestamp.
-
-## Atomic replacement
-
-The state file is never modified in place.
-
-The hook:
-
-1. creates a temporary file in the destination directory;
-2. writes the complete JSON document;
-3. flushes and `fsync()`s the temporary file;
-4. changes its mode to `0640`;
-5. atomically replaces the live file with `os.replace()`.
-
-A consuming `queuejob` hook therefore observes either the previous complete
-file or the new complete file, never a partially written JSON document.
-
-The destination directory is created with mode `0750` if it does not exist.
-
-## Reading from another hook
-
-A server-side consumer can use equivalent PBS_HOME resolution and then:
-
-```python
-with open(path, "r") as f:
-    data = json.load(f)
-
-gpu_caps = data.get("resources", {}).get("gpu_cap", [])
-cpu_isas = data.get("resources", {}).get("cpu_isa", [])
-```
-
-Because updates use atomic rename, explicit file locking is not necessary for
-the normal single-writer/multiple-reader model.
-
-## PBS_HOME discovery
-
-The hook first checks the `PBS_HOME` environment variable.
-
-If it is absent, it reads:
-
-```text
-PBS_CONF_FILE
-```
-
-or, by default:
-
-```text
-/etc/pbs.conf
-```
-
-and obtains `PBS_HOME` from there.
-
-## Hook setup
-
-The supplied qmgr file creates only the periodic hook:
-
-```text
-aggregate_resources
-```
-
-No custom `all_*` server resources are created.
-
-The default period is 300 seconds.
-
-## Installation
-
-Copy the Python and JSON files to the paths referenced by the qmgr setup and
-run:
-
-```bash
-qmgr < hook_aggregate_resources.qmgr
-```
-
-For an existing hook, re-import both the implementation and configuration:
-
-```bash
-qmgr -c "import hook aggregate_resources application/x-python default /root/openpbs.hooks/hook_aggregate_resources.py"
-
-qmgr -c "import hook aggregate_resources application/x-config default /root/openpbs.hooks/hook_aggregate_resources.json"
-```
-
-After the next periodic run, inspect the generated state file, for example:
-
-```bash
-cat /var/spool/pbs/server_priv/hooks/hook_data/aggregate_resources.json
-```
-
-using the actual value of `PBS_HOME` on the server.
+Configuration and file-writing errors are logged. Because this hook is used to maintain auxiliary state rather than to execute a job, administrators should monitor the PBS server log for failures and ensure that the configured output directory is writable by the PBS server process.
