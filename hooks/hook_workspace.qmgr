@@ -20,16 +20,16 @@ set resource scratch_shm flag = h
 # discovery-selected backend used by each top-level scratch class.
 
 create resource scratch_local_subtype
-set resource scratch_local_subtype type = string
-set resource scratch_local_subtype flag = h
+set resource scratch_local_subtype type = string_array
+set resource scratch_local_subtype flag = ho
 
 create resource scratch_shared_subtype
-set resource scratch_shared_subtype type = string
-set resource scratch_shared_subtype flag = h
+set resource scratch_shared_subtype type = string_array
+set resource scratch_shared_subtype flag = ho
 
 create resource scratch_shm_subtype
-set resource scratch_shm_subtype type = string
-set resource scratch_shm_subtype flag = h
+set resource scratch_shm_subtype type = string_array
+set resource scratch_shm_subtype flag = ho
 
 # hook -------------------------------------------
 
