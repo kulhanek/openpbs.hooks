@@ -15,7 +15,7 @@ set hook normalize_job_cpuisa enabled = true
 set hook normalize_job_cpuisa event = queuejob
 set hook normalize_job_cpuisa user = pbsadmin
 set hook normalize_job_cpuisa alarm = 30
-set hook normalize_job_cpuisa order = 10
+set hook normalize_job_cpuisa order = 20
 set hook normalize_job_cpuisa debug = false
 set hook normalize_job_cpuisa fail_action = none
 
