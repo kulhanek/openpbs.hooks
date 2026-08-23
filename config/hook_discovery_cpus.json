@@ -5,12 +5,14 @@
         {
             "pattern": "*AMD*",
             "cs": false,
-            "alias": "amd"
+            "alias": "amd",
+            "arch": "x86_64"
         },
         {
             "pattern": "*Intel*",
             "cs": false,
-            "alias": "intel"
+            "alias": "intel",
+            "arch": "x86_64"
         }
     ],
     "default_cpu_spec": 30.0,
@@ -19,5 +21,61 @@
             "pattern": "*AMD EPYC 7402P*",
             "value": 40.1
         }
-    ]
+    ],
+    "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
+    "cpu_isa": {
+        "x86_64": {
+            "x86-64-v1": [
+                "x86-64-v1",
+                "x86-64-v2",
+                "x86-64-v3",
+                "x86-64-v4"
+            ],
+            "x86-64-v2": [
+                "x86-64-v2",
+                "x86-64-v3",
+                "x86-64-v4"
+            ],
+            "x86-64-v3": [
+                "x86-64-v3",
+                "x86-64-v4"
+            ],
+            "x86-64-v4": [
+                "x86-64-v4"
+            ]
+        },
+
+        "aarch64": {
+            "armv8.5-a": [
+                "armv8.5-a",
+                "armv8.6-a",
+                "armv8.7-a",
+                "armv8.8-a",
+                "armv8.9-a",
+                "armv9-a",
+                "armv9.1-a",
+                "armv9.2-a"
+            ],
+
+            "armv8.6-a": [
+                "armv8.6-a",
+                "armv8.7-a",
+                "armv8.8-a",
+                "armv8.9-a",
+                "armv9.1-a",
+                "armv9.2-a"
+            ],
+
+            "armv9-a": [
+                "armv9-a",
+                "armv9.1-a",
+                "armv9.2-a"
+            ],
+
+            "armv9.1-a": [
+                "armv9.1-a",
+                "armv9.2-a"
+            ]
+        }
+    }
 }

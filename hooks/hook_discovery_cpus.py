@@ -13,8 +13,9 @@ Published vnode resources
 * vmem           : usable physical memory + configured system swap
 * cpu_model      : CPU model name(s)
 * cpu_vendor     : native CPU vendor, optionally translated through cpu_vendor_map
-* cpu_flag       : CPU flags common to all online logical CPUs
-* cpu_isa        : highest x86-64 psABI feature level supported by the node
+* cpu_arch       : normalized CPU architecture (for example x86_64 or aarch64)
+* cpu_flag       : CPU flags/features common to all online logical CPUs
+* cpu_isa        : highest supported ISA baseline detected for the CPU architecture
 * cpu_spec       : relative speed of one CPU core, derived from cpu_model
 
 CPU topology is derived from Linux sysfs, CPU metadata from /proc/cpuinfo,
@@ -32,6 +33,7 @@ Suggested custom PBS resources
     npus_per_core  : string
     cpu_model      : string_array (or string on homogeneous nodes)
     cpu_vendor     : string_array (or string on homogeneous nodes)
+    cpu_arch       : string_array
     cpu_flag       : string_array
     cpu_isa        : string_array
     cpu_spec       : float
@@ -82,6 +84,40 @@ _X86_64_ISA_LEVEL_FLAGS = (
     ),
 )
 
+# AArch64 ISA baselines that can be established conservatively from Linux
+# /proc/cpuinfo Features (arm64 ELF HWCAP names).  Some Arm architecture
+# revisions add no uniquely observable userspace feature, therefore this hook
+# never guesses such a revision merely from its numeric ordering.
+#
+# The table below follows the cumulative default feature sets used by GCC for
+# -march=armv8.*-a / armv9.*-a, translated to Linux feature names.  Armv9 is a
+# branch from the Armv8.5-A baseline, so it is handled separately below.
+_AARCH64_ISA_LEVEL_FLAGS = (
+    (
+        "armv8.1-a",
+        frozenset(("crc32", "atomics", "asimdrdm")),
+    ),
+    # armv8.2-a has no additional default GCC feature bundle over armv8.1-a;
+    # it cannot be established reliably from /proc/cpuinfo Features alone.
+    (
+        "armv8.3-a",
+        frozenset(("paca", "pacg", "fcma", "jscvt")),
+    ),
+    (
+        "armv8.4-a",
+        frozenset(("flagm", "asimdfhm", "asimddp", "ilrcpc")),
+    ),
+    (
+        "armv8.5-a",
+        frozenset(("sb", "ssbs", "predres", "frint", "flagm2")),
+    ),
+    (
+        "armv8.6-a",
+        frozenset(("bf16", "i8mm")),
+    ),
+)
+
+
 
 def detect_x86_64_isa(common_flags):
     """
@@ -91,12 +127,8 @@ def detect_x86_64_isa(common_flags):
     one value.  For example, a v3-capable node publishes:
         x86-64-v3
 
-    Non-x86-64 systems return an empty string.
+    The caller is responsible for dispatching this function only for x86-64.
     """
-    machine = str(os.uname().machine or "").lower()
-    if machine not in ("x86_64", "amd64"):
-        return ""
-
     flags = set(str(flag).strip().lower() for flag in common_flags if str(flag).strip())
     highest = "x86-64-v1"
 
@@ -112,6 +144,101 @@ def detect_x86_64_isa(common_flags):
     # cpu_isa remains a PBS string_array resource, but only the highest
     # supported ISA level is published.
     return highest
+
+
+def normalize_cpu_arch(machine):
+    """Return a stable architecture token suitable for cpu_arch."""
+    arch = str(machine or "").strip().lower()
+    aliases = {
+        "amd64": "x86_64",
+        "x86-64": "x86_64",
+        "arm64": "aarch64",
+    }
+    return aliases.get(arch, arch)
+
+
+def detect_aarch64_isa(common_flags):
+    """
+    Return the highest AArch64 ISA baseline that can be established safely.
+
+    Linux exposes AArch64 CPU capabilities as /proc/cpuinfo ``Features``.
+    Those capabilities are sufficient to prove many Arm architectural levels,
+    but not every revision.  In particular Armv8.2-A adds no distinct default
+    feature bundle over Armv8.1-A, so the function deliberately reports the
+    highest level whose required feature set is observable instead of guessing.
+
+    Armv9-A derives from the Armv8.5-A baseline plus SVE/SVE2.  Armv9.1-A adds
+    BF16 and I8MM, matching the Armv8.6-A additions.
+    """
+    flags = set(str(flag).strip().lower() for flag in common_flags if str(flag).strip())
+
+    # AArch64 Linux implies an Armv8-A userspace baseline.
+    highest_v8 = "armv8-a"
+    for level, required in _AARCH64_ISA_LEVEL_FLAGS:
+        if required.issubset(flags):
+            highest_v8 = level
+        else:
+            break
+
+    # Armv9-A is not simply the next Armv8 revision.  It branches from
+    # Armv8.5-A and additionally requires SVE and SVE2.
+    if highest_v8 in ("armv8.5-a", "armv8.6-a") and {"sve", "sve2"}.issubset(flags):
+        if highest_v8 == "armv8.6-a":
+            return "armv9.1-a"
+        return "armv9-a"
+
+    return highest_v8
+
+
+def detect_cpu_isa(cpu_arch, common_flags):
+    """Return the highest supported ISA baseline for the normalized architecture."""
+    if cpu_arch == "x86_64":
+        return detect_x86_64_isa(common_flags)
+    if cpu_arch == "aarch64":
+        return detect_aarch64_isa(common_flags)
+    return ""
+
+
+def map_cpu_identity(vendor, vendor_map, system_arch):
+    """
+    Map native CPU vendor and, optionally, architecture using cpu_vendor_map.
+
+    Supported entry fields:
+        pattern : shell-style wildcard pattern matched against the native vendor
+        cs      : case-sensitive matching when true; default false
+        alias   : value published in cpu_vendor when matched
+        arch    : optional value published in cpu_arch when matched
+
+    The first matching entry wins.  If no mapping supplies ``arch``, cpu_arch
+    falls back to the normalized system architecture from uname(2).
+    """
+    native = str(vendor or "").strip()
+    arch = normalize_cpu_arch(system_arch)
+    if not native:
+        return native, arch
+
+    for entry in vendor_map or []:
+        if not isinstance(entry, dict):
+            continue
+
+        pattern = str(entry.get("pattern", "")).strip()
+        if not pattern:
+            continue
+
+        cs = bool(entry.get("cs", False))
+        if cs:
+            matched = fnmatch.fnmatchcase(native, pattern)
+        else:
+            matched = fnmatch.fnmatchcase(native.lower(), pattern.lower())
+
+        if matched:
+            alias = str(entry.get("alias", "")).strip() or native
+            mapped_arch = str(entry.get("arch", "")).strip()
+            if mapped_arch:
+                arch = normalize_cpu_arch(mapped_arch)
+            return alias, arch
+
+    return native, arch
 
 
 def log(level, msg):
@@ -201,42 +328,6 @@ def vnode_is_local(name):
 def join_resource_values(values):
     """Return a stable comma-separated value suitable for string_array resources."""
     return ",".join(sorted(set(str(v).strip() for v in values if str(v).strip())))
-
-
-def map_cpu_vendor(vendor, vendor_map):
-    """
-    Translate a native CPU vendor string using the first matching map entry.
-
-    Supported entry fields:
-        pattern : shell-style wildcard pattern, e.g. "*AMD*"
-        cs      : case-sensitive matching when true; default false
-        alias   : value published in cpu_vendor when matched
-
-    If no entry matches, the native vendor string is returned unchanged.
-    """
-    native = str(vendor or "").strip()
-    if not native:
-        return native
-
-    for entry in vendor_map or []:
-        if not isinstance(entry, dict):
-            continue
-
-        pattern = str(entry.get("pattern", "")).strip()
-        alias = str(entry.get("alias", "")).strip()
-        if not pattern or not alias:
-            continue
-
-        cs = bool(entry.get("cs", False))
-        if cs:
-            matched = fnmatch.fnmatchcase(native, pattern)
-        else:
-            matched = fnmatch.fnmatchcase(native.lower(), pattern.lower())
-
-        if matched:
-            return alias
-
-    return native
 
 
 def map_cpu_spec(cpu_model, cpu_spec_map, default_cpu_spec):
@@ -389,8 +480,10 @@ class NodeDiscovery(object):
 
         models = []
         vendors = []
+        arches = []
         flag_sets = []
         vendor_map = self.cfg.get("cpu_vendor_map", [])
+        system_arch = normalize_cpu_arch(os.uname().machine)
 
         for rec in selected:
             model = rec.get("model name") or rec.get("Processor") or rec.get("Hardware")
@@ -400,16 +493,32 @@ class NodeDiscovery(object):
             if model:
                 models.append(model)
             if vendor:
-                vendors.append(map_cpu_vendor(vendor, vendor_map))
+                mapped_vendor, mapped_arch = map_cpu_identity(vendor, vendor_map, system_arch)
+                if mapped_vendor:
+                    vendors.append(mapped_vendor)
+                if mapped_arch:
+                    arches.append(mapped_arch)
             if flags:
                 flag_sets.append(set(flags.split()))
 
+        # cpu_arch is always available from the system even if /proc/cpuinfo
+        # does not expose a vendor field or no cpu_vendor_map entry matches.
+        if not arches and system_arch:
+            arches.append(system_arch)
+
         common_flags = sorted(set.intersection(*flag_sets)) if flag_sets else []
+        cpu_arch = join_resource_values(arches)
+        # A physical host is expected to have one execution architecture.
+        # If malformed/mixed input produced more than one token, do not derive
+        # an ISA from an ambiguous architecture value.
+        isa_arch = cpu_arch if "," not in cpu_arch else ""
+
         return {
             "cpu_model": join_resource_values(models),
             "cpu_vendor": join_resource_values(vendors),
+            "cpu_arch": cpu_arch,
             "cpu_flag": join_resource_values(common_flags),
-            "cpu_isa": detect_x86_64_isa(common_flags),
+            "cpu_isa": detect_cpu_isa(isa_arch, common_flags),
         }
 
     def discover(self):
@@ -446,7 +555,7 @@ class NodeDiscovery(object):
             for key, value in resources.items():
                 if key == "vmem" and not self.cfg.get("publish_vmem", True):
                     continue
-                if value == "" and key not in ("cpu_flag", "cpu_isa"):
+                if value == "" and key not in ("cpu_flag", "cpu_isa", "cpu_arch"):
                     continue
                 vnode.resources_available[key] = value
             updated = True
@@ -456,7 +565,7 @@ class NodeDiscovery(object):
 
         log(
             pbs.EVENT_DEBUG,
-            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s cpu_isa=%s cpu_spec=%s"
+            "published ncpus=%d nthreads=%d smt=%s hybrid_cpu=%s npus_per_core=%s mem=%s%s cpu_vendor=%s cpu_arch=%s cpu_isa=%s cpu_spec=%s"
             % (
                 resources["ncpus"],
                 resources["nthreads"],
@@ -466,6 +575,7 @@ class NodeDiscovery(object):
                 resources["mem"],
                 " vmem=%s" % resources["vmem"] if self.cfg.get("publish_vmem", True) else "",
                 resources.get("cpu_vendor", ""),
+                resources.get("cpu_arch", ""),
                 resources.get("cpu_isa", ""),
                 resources.get("cpu_spec", ""),
             ),

@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# CPU ISA normalization
+# ---------------------------------------------------------------------------
+#
+# Prerequisites:
+#   - cpu_arch and cpu_isa are defined by hook_discovery_cpus.qmgr
+#   - user_select is defined by the common select-normalization setup
+#   - hook_discovery_cpus.json is the shared CPU configuration file
+#
+# No custom resources are created by this file.
+
+create hook normalize_job_cpuisa
+set hook normalize_job_cpuisa type = site
+set hook normalize_job_cpuisa enabled = true
+set hook normalize_job_cpuisa event = queuejob
+set hook normalize_job_cpuisa user = pbsadmin
+set hook normalize_job_cpuisa alarm = 30
+set hook normalize_job_cpuisa order = 10
+set hook normalize_job_cpuisa debug = false
+set hook normalize_job_cpuisa fail_action = none
+
+import hook normalize_job_cpuisa application/x-python default /root/openpbs.hooks/hooks/hook_normalize_job_cpuisa.py
+
+# The configuration is shared with hook_discovery_cpus.  In particular,
+# normalize_job_cpuisa uses "cpu_isa" and optionally "state_file".
+import hook normalize_job_cpuisa application/x-config default /root/openpbs.hooks/config/hook_discovery_cpus.json
