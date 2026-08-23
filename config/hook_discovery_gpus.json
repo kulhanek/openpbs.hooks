@@ -1,5 +1,4 @@
 {
-    "use_compatible_gpu_cap": false,
     "state_file": "server_priv/hooks/hook_data/aggregate_resources.json",
     "vendors": {
         "nvidia": {
@@ -27,6 +26,74 @@
                 "sm_110": "blackwell",
                 "sm_120": "blackwell",
                 "sm_121": "blackwell"
+            }
+        },
+        "amd": {
+            "enabled": true,
+            "commands": {
+                "amd_smi": "/usr/bin/amd-smi"
+            },
+            "architectures": {
+                "gfx900": "gcn5",
+                "gfx902": "gcn5",
+                "gfx904": "gcn5",
+                "gfx906": "gcn5",
+                "gfx908": "cdna",
+                "gfx90a": "cdna2",
+                "gfx942": "cdna3",
+                "gfx950": "cdna4",
+                "gfx1010": "rdna",
+                "gfx1011": "rdna",
+                "gfx1012": "rdna",
+                "gfx1013": "rdna",
+                "gfx1030": "rdna2",
+                "gfx1031": "rdna2",
+                "gfx1032": "rdna2",
+                "gfx1033": "rdna2",
+                "gfx1034": "rdna2",
+                "gfx1035": "rdna2",
+                "gfx1036": "rdna2",
+                "gfx1100": "rdna3",
+                "gfx1101": "rdna3",
+                "gfx1102": "rdna3",
+                "gfx1103": "rdna3",
+                "gfx1150": "rdna3.5",
+                "gfx1151": "rdna3.5",
+                "gfx1152": "rdna3.5",
+                "gfx1153": "rdna3.5",
+                "gfx1154": "rdna3.5",
+                "gfx1200": "rdna4",
+                "gfx1201": "rdna4"
+            },
+            "portable_targets": {
+                "gfx900": "gfx9-generic",
+                "gfx902": "gfx9-generic",
+                "gfx904": "gfx9-generic",
+                "gfx906": "gfx9-generic",
+                "gfx942": "gfx9-4-generic",
+                "gfx950": "gfx9-4-generic",
+                "gfx1010": "gfx10-1-generic",
+                "gfx1011": "gfx10-1-generic",
+                "gfx1012": "gfx10-1-generic",
+                "gfx1013": "gfx10-1-generic",
+                "gfx1030": "gfx10-3-generic",
+                "gfx1031": "gfx10-3-generic",
+                "gfx1032": "gfx10-3-generic",
+                "gfx1033": "gfx10-3-generic",
+                "gfx1034": "gfx10-3-generic",
+                "gfx1035": "gfx10-3-generic",
+                "gfx1036": "gfx10-3-generic",
+                "gfx1100": "gfx11-generic",
+                "gfx1101": "gfx11-generic",
+                "gfx1102": "gfx11-generic",
+                "gfx1103": "gfx11-generic",
+                "gfx1150": "gfx11-generic",
+                "gfx1151": "gfx11-generic",
+                "gfx1152": "gfx11-generic",
+                "gfx1153": "gfx11-generic",
+                "gfx1154": "gfx11-generic",
+                "gfx1200": "gfx12-generic",
+                "gfx1201": "gfx12-generic"
             }
         }
     }
