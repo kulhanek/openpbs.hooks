@@ -47,4 +47,4 @@ set hook discovery_gpus debug = false
 set hook discovery_gpus fail_action = none
 
 import hook discovery_gpus application/x-python default /root/openpbs.hooks/hooks/hook_discovery_gpus.py
-import hook discovery_gpus application/x-config default /root/openpbs.hooks/hooks/hook_discovery_gpus.json
+import hook discovery_gpus application/x-config default /root/openpbs.hooks/config/hook_discovery_gpus.json

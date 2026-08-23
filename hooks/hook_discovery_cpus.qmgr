@@ -57,4 +57,4 @@ set hook discovery_cpus debug = false
 set hook discovery_cpus fail_action = none
 
 import hook discovery_cpus application/x-python default /root/openpbs.hooks/hooks/hook_discovery_cpus.py
-import hook discovery_cpus application/x-config default /root/openpbs.hooks/hooks/hook_discovery_cpus.json
+import hook discovery_cpus application/x-config default /root/openpbs.hooks/config/hook_discovery_cpus.json

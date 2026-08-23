@@ -14,8 +14,8 @@ set hook normalize_job_gpucap order = 10
 set hook normalize_job_gpucap debug = false
 set hook normalize_job_gpucap fail_action = none
 
-import hook normalize_job_gpucap application/x-python default /root/openpbs.hooks/hook_normalize_job_gpucap.py
+import hook normalize_job_gpucap application/x-python default /root/openpbs.hooks/hooks/hook_normalize_job_gpucap.py
 
 # the configuration is shared with hook_discovery_gpus
-import hook normalize_job_gpucap application/x-config default /root/openpbs.hooks/hook_discovery_gpus.json
+import hook normalize_job_gpucap application/x-config default /root/openpbs.hooks/config/hook_discovery_gpus.json
 

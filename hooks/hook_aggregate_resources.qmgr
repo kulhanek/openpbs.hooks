@@ -16,4 +16,4 @@ set hook aggregate_resources debug = false
 set hook aggregate_resources fail_action = none
 
 import hook aggregate_resources application/x-python default /root/openpbs.hooks/hooks/hook_aggregate_resources.py
-import hook aggregate_resources application/x-config default /root/openpbs.hooks/hooks/hook_aggregate_resources.json
+import hook aggregate_resources application/x-config default /root/openpbs.hooks/config/hook_aggregate_resources.json
