@@ -2,173 +2,136 @@
 
 ## Overview
 
-`hook_normalize_job_gpucap` normalizes GPU compute-capability expressions in a submitted job's `Resource_List.select`. It converts CUDA `compute_XX` notation to the cluster's canonical `sm_XX` notation and can expand a requested capability into compatible alternatives according to the architecture mapping shared with `hook_discovery_gpus`.
+`hook_normalize_job_gpucap` normalizes `gpu_cap` values in every chunk of a submitted job's `Resource_List.select`.
 
-The hook operates at job submission time. It does not discover GPUs or allocate devices.
+A `gpu_cap` value is either one token or a comma-separated list of tokens. Ordinary user-provided tokens are kept unchanged. NVIDIA CUDA `compute_XX` tokens are converted to `sm_XX` and expanded with newer NVIDIA SM capabilities from the ordered configuration shared with `hook_discovery_gpus`.
+
+The hook runs at job submission time. It does not discover GPUs or allocate GPU devices.
 
 ## User documentation
 
-The hook accepts several forms for the `gpu_cap` value in a `select` chunk.
-
-### Canonical capability
-
-A normal NVIDIA SM capability can be requested directly:
+A `gpu_cap` request can contain one token:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=sm_86
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=sm_90
 ```
 
-Whether an unwrapped value is expanded to compatible capabilities is controlled by the site configuration option `use_compatible_gpu_cap`.
-
-### CUDA compute notation
-
-CUDA-style compute notation is converted automatically:
+or several comma-separated tokens:
 
 ```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=compute_86
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=sm_90,gfx942
 ```
 
-is normalized to the canonical `sm_86` form before scheduling.
+Tokens may contain letters, digits, `_`, `.`, and `-`, allowing values such as `sm_90`, `gfx942`, and `gfx11-generic`.
 
-### Exact request
-
-To prohibit compatibility expansion, use:
-
-```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=exact[sm_86]
-```
-
-or equivalently:
-
-```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=exact[compute_86]
-```
-
-The wrapper is removed and only the canonical requested capability remains.
-
-### Compatible request
-
-To explicitly request compatibility expansion, use:
-
-```bash
-#PBS -l select=1:ncpus=8:ngpus=1:gpu_cap=compat[sm_86]
-```
-
-Compatibility expansion is **forward-only**, and the order of capabilities in the vendor `architectures` map is significant: it is assumed to be sorted from oldest to newest.
-
-For `compat[sm_XX]`, `sm_XX` is the minimum capability and expansion remains within the same GPU architecture. For example, with the supplied NVIDIA map:
+All ordinary tokens are kept as specified by the user. Only `compute_XX` has special meaning. For example:
 
 ```text
-compat[sm_80] -> sm_80,sm_86,sm_87
-compat[sm_86] -> sm_86,sm_87
+compute_90
 ```
 
-The older `sm_80` capability is therefore not included for `compat[sm_86]`.
-
-For `compat[compute_XX]`, `compute_XX` is canonicalized to `sm_XX`, but its compatibility semantics are different: `sm_XX` is the minimum and **all later capabilities from the same vendor are accepted regardless of architecture**. With the supplied NVIDIA map:
+is converted to:
 
 ```text
-compat[compute_86] -> sm_86,sm_87,sm_89,sm_90,sm_100,sm_103,sm_110,sm_120,sm_121
+sm_90
 ```
 
-When cluster-state filtering is enabled, hook-generated alternatives not currently present in the cluster are removed from these lists.
+and the hook also adds every later NVIDIA capability from the configured NVIDIA capability list. With the supplied configuration:
 
-The exact alternatives can be filtered against the capabilities currently known to exist in the cluster. The capability explicitly requested by the user is never removed merely because the aggregate state file is missing or stale.
+```text
+compute_90 -> sm_90,sm_100,sm_103,sm_110,sm_120,sm_121
+```
 
-Malformed `exact[...]` or `compat[...]` expressions are rejected at submission.
+More than one `compute_XX` token can be used in the same `gpu_cap` value. Their generated compatibility alternatives are combined with all other user-provided tokens. Duplicates are removed and the final value is sorted.
+
+The same normalization is performed independently for every `select` chunk containing `gpu_cap`.
+
+If aggregate GPU inventory filtering is configured and available, generated compatibility alternatives that do not currently exist in the aggregate `gpu_cap` inventory are removed. Explicit user-provided values, including the `sm_XX` produced directly from `compute_XX`, are not removed by this filtering.
 
 ## Technical and administration documentation
 
 ### Hook event
 
-The supplied `hook_normalize_job_gpucap.qmgr` installs the hook for `queuejob` with order 10.
+The supplied `hook_normalize_job_gpucap.qmgr` installs the hook for the `queuejob` event with order 20. The Python implementation also recognizes `modifyjob`, although the supplied `.qmgr` configuration enables only `queuejob`.
 
-The Python implementation contains logic that can recognize a modify-job event, but the supplied administrative configuration enables only `queuejob`; this documentation therefore describes the deployed behavior.
+### Accepted `gpu_cap` syntax
+
+A complete `gpu_cap` value is parsed as a comma-separated list of tokens. Every token must match:
+
+```text
+[A-Za-z0-9][A-Za-z0-9_.-]*
+```
+
+The following are therefore valid examples:
+
+```text
+sm_90
+gfx942
+gfx11-generic
+sm_90,gfx942
+compute_90,sm_89,gfx942
+```
+
+Empty entries, brackets, wrappers, and other expression syntax are rejected.
 
 ### Normalization algorithm
 
-The hook parses `Resource_List.select` into chunks and only changes `gpu_cap` values. Other chunk resources and chunk multipliers are preserved.
+For each `select` chunk containing `gpu_cap`, the hook:
 
-Normalization performs the following operations:
+1. splits `gpu_cap` on commas and validates every token;
+2. keeps every ordinary user-provided token unchanged;
+3. converts every `compute_XX` token to `sm_XX`;
+4. locates that `sm_XX` in `vendors.nvidia.architectures`;
+5. adds all NVIDIA capability keys appearing *after* that entry, continuing to the end of the configured list without restricting expansion to the same architecture family;
+6. optionally filters only these generated alternatives against the aggregate `resources.gpu_cap` inventory;
+7. combines user values and generated values, removes duplicates, sorts the result, and writes it back to the chunk.
 
-1. Parse optional `exact[...]` or `compat[...]` wrapper.
-2. Canonicalize `compute_XX` to `sm_XX`.
-3. Decide whether compatibility expansion is enabled:
-   - `exact[...]`: never expand;
-   - `compat[...]`: always request expansion;
-   - unwrapped value: follow `use_compatible_gpu_cap`.
-4. Generate forward-compatible capabilities from the configured vendor architecture list, using different rules for `sm_XX` and `compute_XX`.
-5. When aggregate cluster state is available, remove hook-generated alternatives not present in `resources.gpu_cap`.
-6. De-duplicate and normalize the final list placed into the select expression.
-
-### Compatibility rules
-
-Compatibility is derived from the ordered capability-to-architecture mapping in `hook_discovery_gpus.json`. The insertion order of `vendors.*.architectures` is semantically significant and must be from oldest to newest capability.
-
-For `compat[sm_XX]`:
-
-- locate `sm_XX` in a vendor architecture map;
-- use its position as the minimum accepted capability;
-- determine the architecture assigned to `sm_XX`;
-- walk forward from that position and include only capabilities belonging to the same architecture;
-- never include an older capability, even if it belongs to the same architecture;
-- if `sm_XX` is absent from the mapping, add no alternatives and retain the explicitly requested `sm_XX`.
-
-Thus, for the supplied Ampere entries:
+For example, with the supplied NVIDIA map:
 
 ```text
-compat[sm_80] -> sm_80,sm_86,sm_87
-compat[sm_86] -> sm_86,sm_87
-compat[sm_87] -> sm_87
+compute_90 -> sm_90,sm_100,sm_103,sm_110,sm_120,sm_121
 ```
 
-For `compat[compute_XX]`:
+The `sm_90` value is the canonicalized user request. The generated compatibility list starts with the next configured entry, `sm_100`, because `sm_90` is already present in the result.
 
-- preserve the fact that the user wrote `compute_XX` before canonicalizing it to `sm_XX`;
-- locate the corresponding `sm_XX` in the vendor map;
-- use that position as the minimum accepted capability;
-- walk forward and include every later capability from that vendor, regardless of architecture.
+If the canonical `sm_XX` value is not present in `vendors.nvidia.architectures`, `compute_XX` is still converted to `sm_XX`, but no compatibility alternatives are added.
 
-For example:
+The insertion order of `vendors.nvidia.architectures` is therefore semantically significant and must be from oldest to newest NVIDIA capability.
+
+### Multiple `compute_XX` values
+
+Each `compute_XX` token is processed independently before the results are merged. For example, a request such as:
 
 ```text
-compat[compute_86] -> sm_86,sm_87,sm_89,sm_90,sm_100,sm_103,sm_110,sm_120,sm_121
+compute_90,compute_120,gfx942
 ```
 
-If the same canonical capability occurs in more than one vendor namespace, the lookup is ambiguous and compatibility expansion is skipped for that token.
-
-### Shared configuration
-
-The `.qmgr` file imports `hook_discovery_gpus.json` as this hook's configuration. Important fields are:
-
-| Field | Description |
-| --- | --- |
-| `use_compatible_gpu_cap` | Default expansion policy for unwrapped `gpu_cap` requests. |
-| `state_file` | JSON cluster-resource aggregate produced by `hook_aggregate_resources`. |
-| `vendors.*.architectures` | Ordered capability-to-architecture map used for compatibility expansion. Entries must be ordered from oldest to newest capability. |
-
-The supplied configuration currently has `use_compatible_gpu_cap: false`, so a plain `gpu_cap=sm_XX` remains exact unless the user explicitly uses `compat[...]`.
+uses both NVIDIA lookup points, keeps `gfx942` unchanged, merges all generated values, and removes duplicates before sorting.
 
 ### Aggregate-state filtering
 
-When `state_file` can be read, the hook uses `resources.gpu_cap` from that file to filter only the alternatives it generated. This prevents normalization from expanding a request to GPU capabilities that are known not to exist anywhere in the cluster.
+The configuration is shared with `hook_discovery_gpus`. If `state_file` is present in the hook configuration and the referenced file exists, the hook reads `resources.gpu_cap` from the aggregate inventory.
 
-If the state file is absent or malformed, compatibility normalization still works from the static configuration, but cluster-presence filtering is skipped.
+Only compatibility alternatives generated from the NVIDIA map are filtered. Values explicitly provided by the user are retained, and `compute_XX -> sm_XX` is treated as the canonical form of the user's own value and is therefore also retained.
+
+If `state_file` is not configured, does not exist, or cannot be parsed, compatibility expansion continues from the static NVIDIA configuration without aggregate-inventory filtering.
+
+Relative `state_file` paths are resolved below `PBS_HOME`; if `PBS_HOME` is not available in the environment, it is read from `PBS_CONF_FILE`, falling back to `/var/spool/pbs`.
 
 ### Preserving the submitted select
 
-Before changing `Resource_List.select`, the hook stores the original value in `Resource_List.user_select` if that field is currently unset or empty. This preserves the user's initial request for inspection/accounting through the normalization pipeline.
+Before changing `Resource_List.select`, the hook stores its current value in `Resource_List.user_select` only when `user_select` is unset or empty. If an earlier normalization hook has already populated `user_select`, that value is preserved.
 
-`user_select` is defined by `hook_normalize_job_mpiomp.qmgr` as a string resource. It is metadata and must not be added to scheduler `resources` configuration.
+This keeps the existing shared backup behavior used by the select-normalization hook pipeline.
 
 ### PBS resources
 
-This hook's own `.qmgr` file creates no resources. It reads/modifies:
+This hook creates no PBS resources and the supplied `.qmgr` resource definitions do not need to change.
 
 | Resource | Purpose |
 | --- | --- |
-| `Resource_List.select` | Input and normalized output. |
-| `gpu_cap` inside select chunks | Capability expression being normalized. |
-| `Resource_List.user_select` | Backup of the original select, defined by the MPI/OpenMP normalization setup. |
+| `Resource_List.select` | Input select specification and normalized output. |
+| `gpu_cap` inside select chunks | Token or comma-separated token list normalized by this hook. |
+| `Resource_List.user_select` | Optional backup of the pre-normalized select, defined elsewhere in the normalization setup. |
 
-The scheduler-visible `gpu_cap` resource itself is defined by `hook_discovery_gpus.qmgr` as `string_array` with flags `ho`.
+The scheduler-visible `gpu_cap` resource remains the `string_array` resource defined by `hook_discovery_gpus.qmgr`.

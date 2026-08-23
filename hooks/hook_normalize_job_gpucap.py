@@ -10,34 +10,32 @@ Purpose
 -------
 Normalize gpu_cap values inside every Resource_List.select chunk.
 
-Supported user syntax
----------------------
+Accepted gpu_cap syntax
+-----------------------
     TOKEN
-    exact[TOKEN]
-    compat[TOKEN]
+    TOKEN,TOKEN,...
 
-NVIDIA convenience syntax:
-    compute_XX -> sm_XX
+A token may contain letters, digits, underscore, dot, and hyphen.  Empty
+entries, wrappers, brackets, or other expression syntax are rejected.
 
-For a plain TOKEN, compatibility expansion is controlled by
-"use_compatible_gpu_cap".  exact[TOKEN] never expands.  compat[TOKEN] always
-attempts expansion.
+NVIDIA convenience syntax
+-------------------------
+Each compute_XX token is canonicalized to sm_XX.  In addition, all NVIDIA
+sm_YY entries following sm_XX in vendors.nvidia.architectures are added as
+compatible alternatives.  The NVIDIA architecture map is therefore ordered
+from oldest to newest capability.
 
-Compatibility is derived from the ordered, vendor-local "architectures" maps.
-For sm_XX, compatibility is forward-only within the same architecture.  For
-compute_XX, compatibility is forward-only within the same vendor regardless
-of architecture.
+If "state_file" is configured and the referenced aggregate inventory exists,
+only hook-added compatibility alternatives present in resources.gpu_cap are
+kept.  User-provided tokens (after compute_XX -> sm_XX canonicalization) are
+never removed by state-file filtering.
 
-If "state_file" is configured and readable, only hook-added compatibility
-alternatives are filtered against resources.gpu_cap from that file.  A value
-explicitly requested by the user (after canonicalization such as
-compute_86 -> sm_86) is never removed by state-file filtering.
-
-The final gpu_cap list is de-duplicated while preserving compatibility order.
+All user values and generated alternatives are combined, sorted, and
+de-duplicated.
 
 Before modifying Resource_List.select, the hook stores the current select in
-Resource_List.user_select only when user_select is None or empty.  This
-allows the first normalization hook in a pipeline to own the backup.
+Resource_List.user_select only when user_select is None or empty.  This lets
+the first normalization hook in a pipeline own the backup.
 
 The JSON configuration is intentionally shared with hook_discovery_gpus.
 """
@@ -53,12 +51,15 @@ import pbs
 HOOK_NAME = "pbs_normalize_job_gpucap"
 
 DEFAULT_CONFIG = {
-    "use_compatible_gpu_cap": False,
     "vendors": {}
 }
 
-WRAPPER_RE = re.compile(r"^(exact|compat)\[(.*)\]$")
+# gpu_cap values published by the GPU discovery hook include forms such as
+# sm_90, gfx942, and gfx11-generic.  Keep the accepted syntax deliberately
+# simple while allowing all of those forms.
+TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 COMPUTE_RE = re.compile(r"^compute_([0-9]+)$")
+SM_RE = re.compile(r"^sm_([0-9]+)$")
 
 
 def log(level, msg):
@@ -118,139 +119,70 @@ def resolve_state_file(path):
     return os.path.join(pbs_home(), path)
 
 
-def canonical_token(token):
-    """Canonicalize vendor-specific aliases while keeping generic tokens opaque."""
-    match = COMPUTE_RE.match(token)
-    if match:
-        return "sm_" + match.group(1)
-    return token
+def parse_gpu_cap_tokens(value):
+    """Parse and validate one complete gpu_cap resource value."""
+    text = str(value)
+    raw_tokens = text.split(",")
+    tokens = []
+
+    for raw in raw_tokens:
+        token = raw.strip()
+        if not token:
+            raise ValueError("gpu_cap contains an empty token")
+        if not TOKEN_RE.match(token):
+            raise ValueError("invalid gpu_cap token: %s" % token)
+        tokens.append(token)
+
+    return tokens
 
 
-def token_compatibility_kind(token):
-    """Return the compatibility semantics implied by the user's spelling."""
-    if COMPUTE_RE.match(token):
-        return "compute"
-    return "sm"
-
-
-def parse_user_token(token):
-    """
-    Return (mode, canonical_value, compatibility_kind).
-
-    mode is one of:
-        default - plain token
-        exact
-        compat
-
-    compatibility_kind preserves whether the user wrote compute_XX or sm_XX,
-    because their compat[] expansion rules differ.
-
-    exact[] and compat[] require one non-empty, comma-free inner token.
-    Unknown capability names are valid and are left untouched.
-    """
-    token = str(token).strip()
-    if not token:
-        raise ValueError("gpu_cap contains an empty token")
-
-    match = WRAPPER_RE.match(token)
-    if match:
-        mode = match.group(1)
-        value = match.group(2).strip()
-        if not value:
-            raise ValueError("%s[] requires a non-empty capability" % mode)
-        if "," in value:
-            raise ValueError("%s[] capability must not contain ','" % mode)
-        return mode, canonical_token(value), token_compatibility_kind(value)
-
-    if token.startswith("exact[") or token.startswith("compat["):
-        raise ValueError("malformed gpu_cap wrapper: %s" % token)
-
-    return "default", canonical_token(token), token_compatibility_kind(token)
-
-
-def architecture_maps(cfg):
-    """
-    Return [(vendor_name, architectures_dict), ...].
-
-    Compatibility namespaces remain vendor-local.  The "enabled" flag controls
-    discovery and does not alter the syntax understood by this normalizer.
-    """
-    result = []
+def nvidia_architectures(cfg):
+    """Return the ordered NVIDIA capability map, or an empty map."""
     vendors = cfg.get("vendors", {})
     if not isinstance(vendors, dict):
-        return result
+        return {}
 
-    for vendor_name in sorted(vendors):
-        vendor_cfg = vendors.get(vendor_name)
-        if not isinstance(vendor_cfg, dict):
-            continue
-        architectures = vendor_cfg.get("architectures", {})
-        if isinstance(architectures, dict):
-            result.append((str(vendor_name), architectures))
-    return result
+    nvidia = vendors.get("nvidia", {})
+    if not isinstance(nvidia, dict):
+        return {}
+
+    architectures = nvidia.get("architectures", {})
+    if not isinstance(architectures, dict):
+        return {}
+
+    return architectures
 
 
-def compatible_tokens(cfg, token, compatibility_kind):
+def compatible_compute_tokens(cfg, sm_token):
     """
-    Return forward-compatible configured values for token.
+    Return NVIDIA capabilities configured after sm_token.
 
-    The order of entries in vendors.*.architectures is significant and is
-    assumed to run from oldest to newest capability.
-
-    sm_XX:
-        start at sm_XX and include only later capabilities with the same
-        architecture in the same vendor.
-
-    compute_XX:
-        start at sm_XX and include every later capability in the same vendor,
-        regardless of architecture.
-
-    If token is absent from the configured maps, no alternatives are added.
-    If it occurs in multiple vendor namespaces, expansion is ambiguous and is
-    skipped.
+    sm_token itself is not returned because compute_XX is already
+    canonicalized to sm_XX as a user-provided value.  Compatibility continues
+    through all later NVIDIA entries, regardless of architecture family.
     """
-    matches = []
-    for vendor_name, architectures in architecture_maps(cfg):
-        keys = [str(value).strip() for value in architectures.keys()]
-        if token in keys:
-            index = keys.index(token)
-            matches.append((vendor_name, architectures, keys, index))
+    architectures = nvidia_architectures(cfg)
+    keys = [str(value).strip() for value in architectures.keys()]
 
-    if not matches:
+    if sm_token not in keys:
         return []
 
-    if len(matches) > 1:
-        log(pbs.EVENT_WARNING,
-            "gpu_cap %s occurs in multiple vendor architecture maps; "
-            "compatibility expansion skipped" % token)
-        return []
-
-    vendor_name, architectures, keys, index = matches[0]
-    architecture = architectures.get(token)
-    values = []
-
-    for capability in keys[index:]:
-        if compatibility_kind == "sm" and architectures.get(capability) != architecture:
-            continue
-        if capability:
-            values.append(capability)
+    index = keys.index(sm_token)
+    values = [value for value in keys[index + 1:] if value]
 
     log(pbs.EVENT_DEBUG3,
-        "compatibility lookup %s/%s/%s -> %s" %
-        (vendor_name, compatibility_kind, token, ",".join(values)))
+        "NVIDIA compatibility lookup %s -> %s" %
+        (sm_token, ",".join(values)))
     return values
 
 
 def load_cluster_gpu_caps(cfg):
     """
-    Return:
-        None  -> state filtering is disabled/unavailable
-        set() -> valid state file, but no gpu_cap values are present
-        set(values) -> current aggregated gpu_cap inventory
+    Return the current aggregate gpu_cap inventory when available.
 
-    Any missing/unreadable/malformed state file disables filtering for this
-    invocation.  The state file is an optimization, not a correctness
-    requirement.
+    None means filtering is disabled because state_file is not configured,
+    does not exist, or cannot be used.  An empty set means a valid aggregate
+    state file was read but it contains no gpu_cap values.
     """
     if "state_file" not in cfg:
         return None
@@ -292,46 +224,51 @@ def load_cluster_gpu_caps(cfg):
         return None
 
 
+def token_sort_key(token):
+    """
+    Sort NVIDIA sm_NN tokens numerically; sort all other tokens naturally.
+
+    This keeps sequences such as sm_90, sm_100, sm_103 in capability order
+    instead of lexicographic order (which would put sm_100 before sm_90).
+    """
+    match = SM_RE.match(token)
+    if match:
+        return (0, int(match.group(1)), token)
+
+    parts = re.split(r"([0-9]+)", token)
+    natural = tuple(
+        (0, int(part)) if part.isdigit() else (1, part.lower())
+        for part in parts if part != ""
+    )
+    return (1, natural, token)
+
+
 def normalize_gpu_cap(value, cfg, cluster_caps=None):
     """
-    Normalize one complete gpu_cap resource value.
+    Normalize one complete gpu_cap value.
 
-    User/canonical values and hook-added alternatives are tracked separately so
-    state-file filtering can never remove a value requested by the user.
-    Output order follows the user request and the configured capability order.
+    Every user token is retained exactly as written except compute_XX, which
+    becomes sm_XX.  Each compute_XX additionally contributes all configured
+    later NVIDIA capabilities.  Only those generated alternatives are subject
+    to aggregate-state filtering.
     """
-    raw_tokens = str(value).split(",")
-    result = []
-    seen = set()
+    result = set()
 
-    expand_plain = bool(cfg.get("use_compatible_gpu_cap", False))
-
-    for raw in raw_tokens:
-        mode, token, compatibility_kind = parse_user_token(raw)
-
-        if token not in seen:
-            result.append(token)
-            seen.add(token)
-
-        expand = (mode == "compat") or (
-            mode == "default" and expand_plain
-        )
-
-        if not expand:
+    for token in parse_gpu_cap_tokens(value):
+        match = COMPUTE_RE.match(token)
+        if not match:
+            result.add(token)
             continue
 
-        for alternative in compatible_tokens(
-                cfg, token, compatibility_kind):
-            alternative = str(alternative).strip()
-            if not alternative or alternative == token:
-                continue
+        canonical = "sm_" + match.group(1)
+        result.add(canonical)
+
+        for alternative in compatible_compute_tokens(cfg, canonical):
             if cluster_caps is not None and alternative not in cluster_caps:
                 continue
-            if alternative not in seen:
-                result.append(alternative)
-                seen.add(alternative)
+            result.add(alternative)
 
-    return ",".join(result)
+    return ",".join(sorted(result, key=token_sort_key))
 
 
 def normalize_chunk(chunk, cfg, cluster_caps):
@@ -379,9 +316,7 @@ def get_resource(job, name):
 
 
 def backup_select(job, select_text):
-    """
-    Backup select only if the shared pipeline backup does not already exist.
-    """
+    """Backup select only if the shared pipeline backup is still empty."""
     backup = get_resource(job, "user_select")
     if backup is None or str(backup).strip() == "":
         job.Resource_List["user_select"] = str(select_text)
@@ -401,9 +336,9 @@ def normalize_job(event, cfg):
     if not changed:
         return
 
-    # The backup is taken immediately before this hook first changes select.
-    # If an earlier normalization hook already populated select_backup, it is
-    # preserved unchanged.
+    # Save the original select immediately before this hook first changes it.
+    # If an earlier normalization hook already populated user_select, preserve
+    # that original value unchanged.
     backup_select(job, select_text)
 
     job.Resource_List["select"] = pbs.select(normalized)

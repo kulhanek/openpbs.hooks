@@ -10,7 +10,7 @@ set hook normalize_job_gpucap enabled = true
 set hook normalize_job_gpucap event = queuejob
 set hook normalize_job_gpucap user = pbsadmin
 set hook normalize_job_gpucap alarm = 30
-set hook normalize_job_gpucap order = 10
+set hook normalize_job_gpucap order = 20
 set hook normalize_job_gpucap debug = false
 set hook normalize_job_gpucap fail_action = none
 
