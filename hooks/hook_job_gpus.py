@@ -1,35 +1,24 @@
 # coding: utf-8
 """
-OpenPBS job hook: whole NVIDIA GPU allocation, cgroup-v2 device
-isolation, CUDA environment setup, and lightweight nvidia-smi accounting.
+OpenPBS job hook: whole physical GPU allocation, cgroup-v2 device
+isolation, vendor-specific runtime environment setup, and lightweight GPU
+accounting for NVIDIA and AMD GPUs.
 
 Scope
 -----
-* Physical NVIDIA GPUs only.  MIG and MIC are intentionally unsupported.
+* Physical NVIDIA and AMD GPUs only. NVIDIA MIG and AMD GPU partitioning are
+  intentionally unsupported.
+* Each vnode is expected to contain GPUs from one vendor, published as
+  resources_available.gpu_vendor by hook_discovery_gpus.
 * GPU allocation is immutable for the lifetime of a job.
 * CPU/memory/cgroup creation is owned by hook_job_cgroups_v2.py.
 * This hook attaches a BPF_CGROUP_DEVICE policy to that existing job cgroup.
-* GPU telemetry uses only nvidia-smi and is non-fatal.  GPU allocation or
-  device-isolation failures are fatal and reject the job.
+* NVIDIA telemetry uses nvidia-smi; AMD telemetry uses amd-smi. Telemetry is
+  non-fatal. GPU allocation or device-isolation failures are fatal.
 * This hook does not publish vnode/resources_available GPU discovery data.
 
-PBS resources expected for accounting
--------------------------------------
-    create resource gpupercent
-    set resource gpupercent type = long
-    set resource gpupercent flag = r
-
-    create resource gpumemmaxpercent
-    set resource gpumemmaxpercent type = long
-    set resource gpumemmaxpercent flag = r
-
-    create resource gpupowerusageavg
-    set resource gpupowerusageavg type = long
-    set resource gpupowerusageavg flag = r
-
-    create resource gpuenergyconsumed
-    set resource gpuenergyconsumed type = long
-    set resource gpuenergyconsumed flag = r
+PBS accounting resources are unchanged: gpupercent, gpumemmaxpercent,
+gpupowerusageavg, and gpuenergyconsumed are long resources with flag r.
 
 Events to enable
 ----------------
@@ -46,6 +35,7 @@ import glob
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import time
@@ -58,13 +48,15 @@ DEFAULT_CONFIG = {
     "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
     "jobs_subdir": "pbs_jobs",
     "state_subdir": "gpu_v2",
-    "nvidia_smi": "/usr/bin/nvidia-smi",
     "device_isolation": True,
     "manage_drm_acl": True,
     "telemetry": True,
     "allocation": "index",          # index | numa
+    "vendors": {
+        "nvidia": {"smi": "/usr/bin/nvidia-smi"},
+        "amd": {"smi": "/usr/bin/amd-smi"},
+    },
 }
-
 
 def log(level, msg):
     pbs.logmsg(level, "pbs_job_gpus: " + str(msg))
@@ -193,40 +185,105 @@ class FileLock(object):
 
 
 # ---------------------------------------------------------------------------
-# NVIDIA runtime inventory
+# Vendor-neutral PCI helpers and vendor runtimes
 # ---------------------------------------------------------------------------
 
+def normalize_pci_bus_id(bus_id):
+    bus = str(bus_id).strip().lower()
+    fields = bus.split(":")
+    if len(fields) == 3 and len(fields[0]) == 8:
+        bus = fields[0][-4:] + ":" + fields[1] + ":" + fields[2]
+    return bus
+
+
+def pci_numa_node(bus_id):
+    path = os.path.join("/sys/bus/pci/devices", normalize_pci_bus_id(bus_id),
+                        "numa_node")
+    try:
+        value = int(open(path, "r").read().strip())
+        return 0 if value < 0 else value
+    except Exception:
+        return 0
+
+
+def pci_drm_devices(bus_id):
+    result = []
+    bus_id = normalize_pci_bus_id(bus_id)
+    for cls in ("card[0-9]*", "renderD[0-9]*"):
+        for path in glob.glob(os.path.join("/sys/class/drm", cls)):
+            if bus_id not in os.path.realpath(path).lower():
+                continue
+            info = dev_info(os.path.join("/dev/dri", os.path.basename(path)))
+            if info and info not in result:
+                result.append(info)
+    return result
+
+
+def _iter_dicts(value, path=()):
+    if isinstance(value, dict):
+        yield path, value
+        for key, item in value.items():
+            for entry in _iter_dicts(item, path + (str(key),)):
+                yield entry
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            for entry in _iter_dicts(item, path + (str(idx),)):
+                yield entry
+
+
+def _flatten(value, prefix="", out=None):
+    if out is None:
+        out = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            token = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            name = (prefix + "_" + token).strip("_")
+            _flatten(item, name, out)
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            _flatten(item, prefix + "_%d" % idx, out)
+    else:
+        out[prefix] = value
+    return out
+
+
+def _number(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value is None:
+        return None
+    match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", str(value))
+    return float(match.group(0)) if match else None
+
+
+def _find_flat(flat, names):
+    names = tuple(re.sub(r"[^a-z0-9]+", "_", x.lower()).strip("_") for x in names)
+    for name in names:
+        for key, value in flat.items():
+            if key == name or key.endswith("_" + name):
+                return value
+    return None
+
+
+def _find_number(flat, names):
+    value = _find_flat(flat, names)
+    return _number(value)
+
+
 class NvidiaRuntime(object):
+    vendor = "nvidia"
+
     def __init__(self, cfg):
         self.cfg = cfg
+        self.smi = cfg["vendors"]["nvidia"]["smi"]
 
     def available(self):
-        return os.path.isfile(self.cfg["nvidia_smi"])
-
-    def _numa_node(self, bus_id):
-        path = os.path.join("/sys/bus/pci/devices", bus_id.lower(), "numa_node")
-        try:
-            value = int(open(path, "r").read().strip())
-            return 0 if value < 0 else value
-        except Exception:
-            return 0
-
-    def _drm_devices(self, bus_id):
-        result = []
-        bus_id = bus_id.lower()
-        for cls in ("card[0-9]*", "renderD[0-9]*"):
-            for path in glob.glob(os.path.join("/sys/class/drm", cls)):
-                if bus_id not in os.path.realpath(path).lower():
-                    continue
-                info = dev_info(os.path.join("/dev/dri", os.path.basename(path)))
-                if info and info not in result:
-                    result.append(info)
-        return result
+        return os.path.isfile(self.smi)
 
     def inventory(self):
         if not self.available():
             return []
-        cmd = [self.cfg["nvidia_smi"],
+        cmd = [self.smi,
                "--query-gpu=index,uuid,pci.bus_id,memory.total",
                "--format=csv,noheader,nounits"]
         rc, out, err = run(cmd)
@@ -240,38 +297,34 @@ class NvidiaRuntime(object):
                 continue
             index = int(parts[0])
             uuid = parts[1]
-            # nvidia-smi usually returns 00000000:BB:DD.F; sysfs uses 0000:BB:DD.F.
-            bus = parts[2].lower()
-            fields = bus.split(":")
-            if len(fields) == 3 and len(fields[0]) == 8:
-                bus = fields[0][-4:] + ":" + fields[1] + ":" + fields[2]
+            bus = normalize_pci_bus_id(parts[2])
             memory = int(float(parts[3]) * 1024 * 1024)
             ndev = dev_info("/dev/nvidia%d" % index)
             if ndev is None:
                 raise RuntimeError("GPU %d has no /dev/nvidia%d device" % (index, index))
+            drm = pci_drm_devices(bus)
             gpus.append({
                 "index": index,
+                "runtime_index": index,
                 "uuid": uuid,
                 "pci_bus_id": bus,
-                "numa": self._numa_node(bus),
+                "numa": pci_numa_node(bus),
                 "memory": memory,
-                "nvidia_device": ndev,
-                "drm_devices": self._drm_devices(bus),
+                "devices": [ndev] + list(drm),
+                "drm_devices": drm,
             })
         gpus.sort(key=lambda g: g["index"])
         return gpus
 
     def telemetry(self):
-        """Return UUID -> instantaneous utilization, memory use, and power."""
         if not self.available():
             return {}
-        cmd = [self.cfg["nvidia_smi"],
+        cmd = [self.smi,
                "--query-gpu=uuid,utilization.gpu,memory.used,memory.total,power.draw",
                "--format=csv,noheader,nounits"]
         rc, out, err = run(cmd)
         if rc != 0:
             raise RuntimeError("nvidia-smi telemetry failed: %s" % err.strip())
-
         values = {}
         for raw in out.splitlines():
             parts = [x.strip() for x in raw.split(",")]
@@ -282,24 +335,154 @@ class NvidiaRuntime(object):
                 mem_used = float(parts[2])
                 mem_total = float(parts[3])
             except (TypeError, ValueError):
-                # Utilization/memory are required for a valid telemetry row.
                 continue
-
             try:
                 power_w = float(parts[4])
             except (TypeError, ValueError):
-                # Some GPUs/drivers report N/A for power.draw.  Keep the
-                # utilization/memory sample usable and omit power accounting.
                 power_w = None
-
             values[parts[0]] = {
-                "util": util,
-                "mem_used": mem_used,
-                "mem_total": mem_total,
-                "power_w": power_w,
+                "util": util, "mem_used": mem_used,
+                "mem_total": mem_total, "power_w": power_w,
             }
         return values
 
+    def environment(self, selected):
+        uuids = [g["uuid"] for g in selected]
+        env = {"CUDA_VISIBLE_DEVICES": "\\,".join(uuids) if uuids else ""}
+        if uuids:
+            env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        return env
+
+
+class AmdRuntime(object):
+    vendor = "amd"
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.smi = cfg["vendors"]["amd"]["smi"]
+
+    def available(self):
+        return os.path.isfile(self.smi)
+
+    def _json(self, args, what):
+        rc, out, err = run([self.smi] + list(args) + ["--json"])
+        if rc != 0:
+            raise RuntimeError("amd-smi %s failed: %s" % (what, err.strip()))
+        try:
+            return json.loads(out)
+        except Exception as exc:
+            raise RuntimeError("cannot parse amd-smi %s JSON: %s" % (what, exc))
+
+    def _vram_total(self, bus, drm):
+        candidates = []
+        for dev in drm:
+            base = os.path.basename(dev["path"])
+            if base.startswith("card"):
+                candidates.append(os.path.join("/sys/class/drm", base, "device",
+                                               "mem_info_vram_total"))
+        candidates.append(os.path.join("/sys/bus/pci/devices", bus,
+                                       "mem_info_vram_total"))
+        for path in candidates:
+            try:
+                return int(open(path, "r").read().strip())
+            except Exception:
+                pass
+        return 0
+
+    def inventory(self):
+        if not self.available():
+            return []
+        data = self._json(["list", "-e"], "list -e")
+        rows = []
+        seen = set()
+        for path, obj in _iter_dicts(data):
+            flat = _flatten(obj)
+            bdf = _find_flat(flat, ("bdf", "pci_bdf", "pci_bus", "pci_bus_id"))
+            uuid = _find_flat(flat, ("uuid", "hip_uuid", "gpu_uuid"))
+            if bdf is None or uuid is None:
+                continue
+            bus = normalize_pci_bus_id(bdf)
+            key = (str(uuid), bus)
+            if key in seen:
+                continue
+            seen.add(key)
+            index = _find_number(flat, ("gpu", "gpu_id", "index", "id"))
+            hip_index = _find_number(flat, ("hip_id", "hip_index"))
+            if index is None:
+                for token in reversed(path):
+                    match = re.search(r"(?:gpu[_ -]?)?(\d+)$", token.lower())
+                    if match:
+                        index = float(match.group(1))
+                        break
+            rows.append((index, hip_index, str(uuid), bus))
+
+        rows.sort(key=lambda row: (row[0] is None, row[0] if row[0] is not None else 0,
+                                   row[3]))
+        gpus = []
+        for fallback, row in enumerate(rows):
+            index, hip_index, uuid, bus = row
+            index = fallback if index is None else int(index)
+            hip_index = index if hip_index is None else int(hip_index)
+            drm = pci_drm_devices(bus)
+            render = [d for d in drm if os.path.basename(d["path"]).startswith("renderD")]
+            if not render:
+                raise RuntimeError("AMD GPU %d at %s has no DRM render device" %
+                                   (index, bus))
+            gpus.append({
+                "index": index,
+                "runtime_index": hip_index,
+                "uuid": uuid,
+                "pci_bus_id": bus,
+                "numa": pci_numa_node(bus),
+                "memory": self._vram_total(bus, drm),
+                "devices": list(drm),
+                "drm_devices": drm,
+            })
+        return gpus
+
+    def telemetry(self):
+        if not self.available():
+            return {}
+        inventory = self.inventory()
+        by_index = {g["index"]: g["uuid"] for g in inventory}
+        by_runtime = {g["runtime_index"]: g["uuid"] for g in inventory}
+        data = self._json(["metric", "-u", "-m", "-p"], "metric")
+        values = {}
+        for path, obj in _iter_dicts(data):
+            flat = _flatten(obj)
+            uuid = _find_flat(flat, ("uuid", "hip_uuid", "gpu_uuid"))
+            if uuid is None:
+                idx = _find_number(flat, ("gpu", "gpu_id", "index", "id", "hip_id"))
+                if idx is not None:
+                    uuid = by_index.get(int(idx), by_runtime.get(int(idx)))
+            if uuid is None:
+                continue
+            util = _find_number(flat, (
+                "gfx_activity", "gfx_usage", "gfx_percent", "gpu_usage",
+                "gpu_utilization", "usage_gfx", "gfx"))
+            mem_used = _find_number(flat, (
+                "vram_used", "vram_usage_used", "used_vram", "memory_vram_used"))
+            mem_total = _find_number(flat, (
+                "vram_total", "vram_usage_total", "total_vram", "memory_vram_total"))
+            power_w = _find_number(flat, (
+                "current_socket_power", "average_socket_power", "socket_power",
+                "power_usage", "current_power", "power"))
+            if util is None or mem_used is None or mem_total is None:
+                continue
+            values[str(uuid)] = {
+                "util": util, "mem_used": mem_used,
+                "mem_total": mem_total, "power_w": power_w,
+            }
+        return values
+
+    def environment(self, selected):
+        # Use the HIP ordinal reported by amd-smi list -e.  Do not set
+        # ROCR_VISIBLE_DEVICES at the same time: combining lower-level ROCR
+        # filtering with HIP ordinal filtering can change the ordinal space.
+        indices = [str(g["runtime_index"]) for g in selected]
+        return {
+            "HIP_VISIBLE_DEVICES": "\\,".join(indices) if indices else "",
+        }
 
 # ---------------------------------------------------------------------------
 # Minimal cgroup-device BPF loader
@@ -510,7 +693,7 @@ def setfacl(path, user, add=True):
 
 
 # ---------------------------------------------------------------------------
-# nvidia-smi telemetry and hook orchestration
+# Vendor-neutral telemetry accounting and hook orchestration
 # ---------------------------------------------------------------------------
 
 def set_resource_used(job, name, value):
@@ -523,14 +706,64 @@ def set_resource_used(job, name, value):
 
 
 class GpuHook(object):
-    def __init__(self):
+    def __init__(self, event=None):
         self.cfg = load_config()
+        self.event = event
         conf = read_pbs_conf()
         pbs_home = conf.get("PBS_MOM_HOME", conf.get("PBS_HOME", "/var/spool/pbs"))
         self.state = GpuState(self.cfg, pbs_home)
-        self.nvidia = NvidiaRuntime(self.cfg)
         self.jobs_root = os.path.join(os.path.realpath(self.cfg["cgroup_root"]),
                                       self.cfg["jobs_subdir"])
+        self.vendor = self._local_gpu_vendor(event)
+        self.runtime = self._runtime(self.vendor)
+
+    def _runtime(self, vendor):
+        if vendor == "nvidia":
+            return NvidiaRuntime(self.cfg)
+        if vendor == "amd":
+            return AmdRuntime(self.cfg)
+        return None
+
+    def _local_gpu_vendor(self, e):
+        local = local_node_names()
+        try:
+            vnode_list = e.vnode_list
+        except Exception:
+            vnode_list = None
+        if vnode_list:
+            try:
+                items = vnode_list.items()
+            except Exception:
+                items = []
+            for name, vnode in items:
+                base = str(name).split("[")[0]
+                if base not in local and base.split(".")[0] not in local:
+                    continue
+                try:
+                    value = vnode.resources_available["gpu_vendor"]
+                except Exception:
+                    value = None
+                if value:
+                    return str(value).strip().lower()
+
+        # Fallback for event types where vnode_list is unavailable.
+        names = []
+        try:
+            for chunk in e.job.exec_vnode.chunks:
+                if vnode_is_local(chunk.vnode_name):
+                    names.append(str(chunk.vnode_name).split("[")[0])
+        except Exception:
+            pass
+        try:
+            server = pbs.server()
+            for name in names:
+                vnode = server.vnode(name)
+                value = vnode.resources_available["gpu_vendor"]
+                if value:
+                    return str(value).strip().lower()
+        except Exception:
+            pass
+        return None
 
     def cgroup_path(self, jobid):
         return os.path.join(self.jobs_root, str(jobid))
@@ -541,7 +774,8 @@ class GpuHook(object):
             if exclude_jobid is not None and str(jobid) == str(exclude_jobid):
                 continue
             for gpu in state.get("gpus", []):
-                used.add(gpu.get("uuid"))
+                if gpu.get("uuid"):
+                    used.add(gpu.get("uuid"))
         return used
 
     def _choose(self, gpus, count, used):
@@ -560,8 +794,7 @@ class GpuHook(object):
         entries = {}
         for gpu in all_gpus:
             allowed = gpu["uuid"] in selected_uuids
-            devices = [gpu["nvidia_device"]] + list(gpu.get("drm_devices", []))
-            for dev in devices:
+            for dev in gpu.get("devices", []):
                 entries[(dev["major"], dev["minor"])] = allowed
         return [(major, minor, allowed)
                 for (major, minor), allowed in sorted(entries.items())]
@@ -585,28 +818,10 @@ class GpuHook(object):
                         (dev["path"], exc))
 
     def _update_telemetry(self, job, state, sample):
-        """
-        Update accounting from one node-wide nvidia-smi sample.
-
-        gpupercent is the running arithmetic mean of the sum of GPU utilization
-        percentages across GPUs allocated to this local job.  Consequently its
-        range is 0..100*N for N GPUs.
-
-        gpumemmaxpercent is the maximum observed aggregate memory fraction:
-        100 * sum(memory.used) / sum(memory.total), range 0..100.
-
-        gpupowerusageavg is the running arithmetic mean of the sum of
-        instantaneous power.draw values, in watts, across the allocated GPUs.
-
-        gpuenergyconsumed is the accumulated energy in watt-hours.  Power is
-        integrated over elapsed wall-clock time.  The first valid power sample
-        is assumed representative from job creation until that sample; later
-        intervals use trapezoidal integration between consecutive samples.
-        """
+        """Update vendor-neutral accounting from one normalized telemetry sample."""
         uuids = [g.get("uuid") for g in state.get("gpus", []) if g.get("uuid")]
         if not uuids:
             return False
-
         rows = [sample[u] for u in uuids if u in sample]
         if len(rows) != len(uuids):
             missing = [u for u in uuids if u not in sample]
@@ -619,54 +834,49 @@ class GpuHook(object):
         mem_used = sum(float(row["mem_used"]) for row in rows)
         mem_total = sum(float(row["mem_total"]) for row in rows)
         mem_pct = 100.0 * mem_used / mem_total if mem_total > 0.0 else 0.0
-
         state["gpu_util_sum"] = float(state.get("gpu_util_sum", 0.0)) + util_sum
         state["gpu_samples"] = int(state.get("gpu_samples", 0)) + 1
         state["gpu_mem_peak_pct"] = max(float(state.get("gpu_mem_peak_pct", 0.0)),
                                          mem_pct)
         state["telemetry_updated"] = now
+        set_resource_used(job, "gpupercent",
+                          int(round(state["gpu_util_sum"] / state["gpu_samples"])))
+        set_resource_used(job, "gpumemmaxpercent",
+                          int(round(state["gpu_mem_peak_pct"])))
 
-        gpupercent = int(round(state["gpu_util_sum"] / state["gpu_samples"]))
-        gpumemmaxpercent = int(round(state["gpu_mem_peak_pct"]))
-        set_resource_used(job, "gpupercent", gpupercent)
-        set_resource_used(job, "gpumemmaxpercent", gpumemmaxpercent)
-
-        # Keep power accounting independent from utilization/memory accounting:
-        # unsupported power.draw must not discard otherwise valid telemetry.
         if all(row.get("power_w") is not None for row in rows):
             power_w = sum(float(row["power_w"]) for row in rows)
             power_samples = int(state.get("gpu_power_samples", 0))
             state["gpu_power_sum_w"] = float(state.get("gpu_power_sum_w", 0.0)) + power_w
             state["gpu_power_samples"] = power_samples + 1
-
             previous_time = state.get("gpu_last_power_time")
             previous_power = state.get("gpu_last_power_w")
             if previous_time is None or previous_power is None:
                 previous_time = float(state.get("created", now))
                 previous_power = power_w
-
             elapsed = max(0.0, now - float(previous_time))
             state["gpu_energy_wh"] = float(state.get("gpu_energy_wh", 0.0)) + (
-                0.5 * (float(previous_power) + power_w) * elapsed / 3600.0
-            )
+                0.5 * (float(previous_power) + power_w) * elapsed / 3600.0)
             state["gpu_last_power_time"] = now
             state["gpu_last_power_w"] = power_w
-
-            gpupowerusageavg = int(round(
-                state["gpu_power_sum_w"] / state["gpu_power_samples"]
-            ))
-            gpuenergyconsumed = int(round(state["gpu_energy_wh"]))
-            set_resource_used(job, "gpupowerusageavg", gpupowerusageavg)
-            set_resource_used(job, "gpuenergyconsumed", gpuenergyconsumed)
-
+            set_resource_used(job, "gpupowerusageavg", int(round(
+                state["gpu_power_sum_w"] / state["gpu_power_samples"])))
+            set_resource_used(job, "gpuenergyconsumed",
+                              int(round(state["gpu_energy_wh"])))
         return True
 
     def begin(self, e):
         job = e.job
         count = local_ngpus(job)
-        all_gpus = self.nvidia.inventory() if self.nvidia.available() else []
+        if count > 0 and self.vendor not in ("nvidia", "amd"):
+            e.reject("pbs_job_gpus: job requests GPUs but vnode gpu_vendor is not nvidia or amd")
+            return False
+        if count > 0 and (self.runtime is None or not self.runtime.available()):
+            e.reject("pbs_job_gpus: %s GPU runtime tool is not available" % self.vendor)
+            return False
+        all_gpus = self.runtime.inventory() if self.runtime is not None else []
         if count > 0 and not all_gpus:
-            e.reject("pbs_job_gpus: job requests GPUs but no NVIDIA GPUs are available")
+            e.reject("pbs_job_gpus: job requests GPUs but no %s GPUs are available" % self.vendor)
             return False
 
         cgroup_path = self.cgroup_path(job.id)
@@ -677,77 +887,75 @@ class GpuHook(object):
         with FileLock(self.state.lock_file):
             used = self._allocated_uuids(exclude_jobid=job.id)
             selected = self._choose(all_gpus, count, used)
-
             if self.cfg.get("device_isolation", True):
                 protected = self._protected_devices(all_gpus, selected)
                 DeviceBpf().attach(cgroup_path, protected)
-
             self._add_drm_acls(job.euser, selected)
-
             state = {
-                "jobid": str(job.id),
-                "created": time.time(),
-                "euser": str(job.euser),
-                "gpus": selected,
-                "gpu_util_sum": 0.0,
-                "gpu_samples": 0,
-                "gpu_mem_peak_pct": 0.0,
-                "gpu_power_sum_w": 0.0,
-                "gpu_power_samples": 0,
-                "gpu_energy_wh": 0.0,
-                "gpu_last_power_time": None,
-                "gpu_last_power_w": None,
+                "jobid": str(job.id), "created": time.time(),
+                "euser": str(job.euser), "vendor": self.vendor,
+                "gpus": selected, "gpu_util_sum": 0.0, "gpu_samples": 0,
+                "gpu_mem_peak_pct": 0.0, "gpu_power_sum_w": 0.0,
+                "gpu_power_samples": 0, "gpu_energy_wh": 0.0,
+                "gpu_last_power_time": None, "gpu_last_power_w": None,
                 "telemetry_updated": None,
             }
             self.state.save(job.id, state)
 
         if selected:
-            set_resource_used(job, "gpupercent", 0)
-            set_resource_used(job, "gpumemmaxpercent", 0)
-            set_resource_used(job, "gpupowerusageavg", 0)
-            set_resource_used(job, "gpuenergyconsumed", 0)
-        log(pbs.EVENT_DEBUG, "job %s allocated GPUs: %s" %
-            (job.id, [g["uuid"] for g in selected]))
+            for name in ("gpupercent", "gpumemmaxpercent",
+                         "gpupowerusageavg", "gpuenergyconsumed"):
+                set_resource_used(job, name, 0)
+        log(pbs.EVENT_DEBUG, "job %s allocated %s GPUs: %s" %
+            (job.id, self.vendor, [g["uuid"] for g in selected]))
         return True
 
     def launch(self, e):
         state = self.state.load(e.job.id)
         if state is None:
             return
-        uuids = [g["uuid"] for g in state.get("gpus", [])]
-        # Explicit empty value prevents accidental use of an unallocated GPU.
-        e.env["CUDA_VISIBLE_DEVICES"] = "\\,".join(uuids) if uuids else ""
-        if uuids:
-            e.env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        runtime = self._runtime(state.get("vendor"))
+        if runtime is None:
+            # Defensive hiding if state predates vendor support or vendor is unknown.
+            for name in ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+                         "HIP_VISIBLE_DEVICES"):
+                e.env[name] = ""
+            return
+        for name, value in runtime.environment(state.get("gpus", [])).items():
+            e.env[name] = value
 
     def periodic(self, e):
-        # e.job_list is a PBS job dictionary.  No pbs_resource object is ever
-        # iterated here; resource access elsewhere is by direct key lookup.
         live = set(str(jobid) for jobid in e.job_list.keys())
         states = self.state.all()
-
-        sample = {}
-        if self.cfg.get("telemetry", True) and self.nvidia.available():
-            try:
-                sample = self.nvidia.telemetry()
-            except Exception as exc:
-                log(pbs.EVENT_ERROR, "nvidia-smi telemetry failed: %s" % exc)
-
-        if sample:
-            for jobid in e.job_list.keys():
-                state = states.get(str(jobid))
-                if not state or not state.get("gpus"):
+        samples = {}
+        if self.cfg.get("telemetry", True):
+            vendors = set(state.get("vendor") for state in states.values()
+                          if state.get("gpus"))
+            for vendor in vendors:
+                runtime = self._runtime(vendor)
+                if runtime is None or not runtime.available():
                     continue
                 try:
-                    job = e.job_list[jobid]
-                    if self._update_telemetry(job, state, sample):
-                        self.state.save(jobid, state)
+                    samples[vendor] = runtime.telemetry()
                 except Exception as exc:
-                    log(pbs.EVENT_ERROR, "GPU telemetry update failed for %s: %s" %
-                        (jobid, exc))
+                    log(pbs.EVENT_ERROR, "%s GPU telemetry failed: %s" %
+                        (vendor, exc))
 
-        # Clean stale allocation state.  The BPF program is bound to the job
-        # cgroup and disappears when the cgroup hook removes that cgroup.
+        for jobid in e.job_list.keys():
+            state = states.get(str(jobid))
+            if not state or not state.get("gpus"):
+                continue
+            sample = samples.get(state.get("vendor"), {})
+            if not sample:
+                continue
+            try:
+                job = e.job_list[jobid]
+                if self._update_telemetry(job, state, sample):
+                    self.state.save(jobid, state)
+            except Exception as exc:
+                log(pbs.EVENT_ERROR, "GPU telemetry update failed for %s: %s" %
+                    (jobid, exc))
+
         for jobid, state in states.items():
             if jobid in live:
                 continue
@@ -760,10 +968,7 @@ class GpuHook(object):
         state = self.state.load(e.job.id)
         if state is None:
             return
-        # Do not take a final post-process nvidia-smi sample: by epilogue time
-        # the GPU workload has normally exited, which would bias gpupercent low.
-        samples = int(state.get("gpu_samples", 0))
-        if state.get("gpus") and samples == 0:
+        if state.get("gpus") and int(state.get("gpu_samples", 0)) == 0:
             log(pbs.EVENT_DEBUG, "job %s ended before any periodic GPU telemetry sample" %
                 e.job.id)
         self._remove_drm_acls(e.job.euser, state)
@@ -782,7 +987,7 @@ class GpuHook(object):
 
 def main():
     e = pbs.event()
-    hook = GpuHook()
+    hook = GpuHook(e)
 
     result = True
     if e.type == pbs.EXECHOST_PERIODIC:
