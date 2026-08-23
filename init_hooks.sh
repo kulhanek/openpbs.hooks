@@ -7,6 +7,7 @@ for HOOK in hook_discovery_node.qmgr  \
             hook_discovery_containers.qmgr  \
             hook_aggregate_resources.qmgr  \
             hook_normalize_job_mpiomp.qmgr  \
+            hook_normalize_job_cpuisa.qmgr  \
             hook_normalize_job_gpucap.qmgr  \
             hook_job_cgroups_v2.qmgr  \
             hook_job_gpus.qmgr  \
