@@ -8,7 +8,7 @@ CPU model
 * smt=true may be requested on its own.  In that case the exact number of
   logical PUs exposed by the later cgroup hook is topology-dependent and this
   hook does not add nthreads.
-* npus_per_core is a string vnode property used for an exact match on uniform
+* npus_per_core is a vnode property used for an exact match on uniform
   SMT hardware.  When requested, this hook also requires/sets smt=true and
   requires/sets nthreads=ncpus*npus_per_core.
 * nthreads is therefore scheduler-consumable only in the explicit uniform-SMT

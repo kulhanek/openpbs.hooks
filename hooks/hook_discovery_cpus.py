@@ -30,9 +30,9 @@ Suggested custom PBS resources
     nthreads       : long
     smt            : boolean
     hybrid_cpu     : boolean
-    npus_per_core  : string
-    cpu_model      : string_array (or string on homogeneous nodes)
-    cpu_vendor     : string_array (or string on homogeneous nodes)
+    npus_per_core  : long
+    cpu_model      : string - homogeneous SMT nodes
+    cpu_vendor     : string - homogeneous SMT nodes
     cpu_arch       : string_array
     cpu_flag       : string_array
     cpu_isa        : string_array
@@ -421,8 +421,8 @@ class CpuTopology(object):
     @property
     def npus_per_core(self):
         if not self.smt or self.hybrid_cpu:
-            return "1"
-        return str(len(self.cores[0]))
+            return 1
+        return len(self.cores[0])
 
 
 class NodeDiscovery(object):
