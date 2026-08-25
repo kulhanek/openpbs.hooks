@@ -13,17 +13,25 @@ Normalize gpu_cap values inside every Resource_List.select chunk.
 Accepted gpu_cap syntax
 -----------------------
     TOKEN
+    compat[sm_XX]
     TOKEN,TOKEN,...
 
-A token may contain letters, digits, underscore, dot, and hyphen.  Empty
-entries, wrappers, brackets, or other expression syntax are rejected.
+Ordinary tokens may contain letters, digits, underscore, dot, and hyphen.
+The only accepted wrapper expression is compat[sm_XX].
 
 NVIDIA convenience syntax
 -------------------------
-Each compute_XX token is canonicalized to sm_XX.  In addition, all NVIDIA
+Plain sm_XX tokens are accepted exactly as supplied and are not validated
+against vendors.nvidia.architectures.
+
+Each compat[sm_XX] keeps the requested sm_XX and adds configured sm_YY
+capabilities with the same major compute capability and a minor revision
+greater than or equal to the requested one.
+
+Each compute_XX token is canonicalized to sm_XX.  As before, all NVIDIA
 sm_YY entries following sm_XX in vendors.nvidia.architectures are added as
-compatible alternatives.  The NVIDIA architecture map is therefore ordered
-from oldest to newest capability.
+compatible alternatives, without a major-version restriction.  The NVIDIA
+architecture map is therefore ordered from oldest to newest capability.
 
 If "state_file" is configured and the referenced aggregate inventory exists,
 only hook-added compatibility alternatives present in resources.gpu_cap are
@@ -60,6 +68,7 @@ DEFAULT_CONFIG = {
 TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 COMPUTE_RE = re.compile(r"^compute_([0-9]+)$")
 SM_RE = re.compile(r"^sm_([0-9]+)$")
+COMPAT_SM_RE = re.compile(r"^compat\[sm_([0-9]+)\]$")
 
 
 def log(level, msg):
@@ -129,7 +138,7 @@ def parse_gpu_cap_tokens(value):
         token = raw.strip()
         if not token:
             raise ValueError("gpu_cap contains an empty token")
-        if not TOKEN_RE.match(token):
+        if not TOKEN_RE.match(token) and not COMPAT_SM_RE.match(token):
             raise ValueError("invalid gpu_cap token: %s" % token)
         tokens.append(token)
 
@@ -151,6 +160,52 @@ def nvidia_architectures(cfg):
         return {}
 
     return architectures
+
+
+def sm_version(token):
+    """Return (major, minor, numeric) for sm_XY, or None."""
+    match = SM_RE.match(token)
+    if not match:
+        return None
+
+    digits = match.group(1)
+    if len(digits) < 2:
+        return None
+
+    major = int(digits[:-1])
+    minor = int(digits[-1])
+    return major, minor, int(digits)
+
+
+def compatible_sm_tokens(cfg, sm_token):
+    """
+    Return configured NVIDIA sm capabilities compatible with sm_token.
+
+    Compatibility for compat[sm_XY] is restricted to the same major compute
+    capability and to requested-or-newer minor revisions.  The requested
+    sm_token itself is not returned because it is always retained explicitly.
+    """
+    requested = sm_version(sm_token)
+    if requested is None:
+        return []
+
+    req_major, _req_minor, req_numeric = requested
+    values = []
+
+    for value in nvidia_architectures(cfg).keys():
+        candidate = str(value).strip()
+        version = sm_version(candidate)
+        if version is None:
+            continue
+        major, _minor, numeric = version
+        if major == req_major and numeric > req_numeric:
+            values.append(candidate)
+
+    values = sorted(set(values), key=token_sort_key)
+    log(pbs.EVENT_DEBUG3,
+        "NVIDIA same-major compatibility lookup %s -> %s" %
+        (sm_token, ",".join(values)))
+    return values
 
 
 def compatible_compute_tokens(cfg, sm_token):
@@ -247,26 +302,41 @@ def normalize_gpu_cap(value, cfg, cluster_caps=None):
     """
     Normalize one complete gpu_cap value.
 
-    Every user token is retained exactly as written except compute_XX, which
-    becomes sm_XX.  Each compute_XX additionally contributes all configured
-    later NVIDIA capabilities.  Only those generated alternatives are subject
-    to aggregate-state filtering.
+    Ordinary user tokens, including plain sm_XX and AMD tokens, are retained
+    exactly as written.  compute_XX becomes sm_XX and contributes all later
+    configured NVIDIA capabilities.  compat[sm_XX] becomes sm_XX and
+    contributes configured requested-or-newer capabilities from the same major
+    compute capability.  Only generated alternatives are subject to aggregate
+    state filtering.
     """
     result = set()
 
     for token in parse_gpu_cap_tokens(value):
-        match = COMPUTE_RE.match(token)
-        if not match:
-            result.add(token)
+        compat_match = COMPAT_SM_RE.match(token)
+        if compat_match:
+            canonical = "sm_" + compat_match.group(1)
+            result.add(canonical)
+
+            for alternative in compatible_sm_tokens(cfg, canonical):
+                if cluster_caps is not None and alternative not in cluster_caps:
+                    continue
+                result.add(alternative)
             continue
 
-        canonical = "sm_" + match.group(1)
-        result.add(canonical)
+        compute_match = COMPUTE_RE.match(token)
+        if compute_match:
+            canonical = "sm_" + compute_match.group(1)
+            result.add(canonical)
 
-        for alternative in compatible_compute_tokens(cfg, canonical):
-            if cluster_caps is not None and alternative not in cluster_caps:
-                continue
-            result.add(alternative)
+            for alternative in compatible_compute_tokens(cfg, canonical):
+                if cluster_caps is not None and alternative not in cluster_caps:
+                    continue
+                result.add(alternative)
+            continue
+
+        # Plain sm_XX is deliberately accepted without checking the NVIDIA
+        # configuration.  AMD/native/portable tokens remain unchanged too.
+        result.add(token)
 
     return ",".join(sorted(result, key=token_sort_key))
 

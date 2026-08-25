@@ -49,7 +49,7 @@ Examples of capability and architecture constraints are:
 
 `cuda_version` is populated only for NVIDIA GPUs. It is cleared for AMD GPUs.
 
-`gpu_cap`, `gpu_arch`, and `cuda_version` are string-array resources. The normal GPU capability request syntax may also be normalized by `hook_normalize_job_gpucap`; see that hook's documentation for `compute_XX` forms.
+`gpu_cap`, `gpu_arch`, and `cuda_version` are string-array resources. GPU requests may also be normalized by `hook_normalize_job_gpucap`. In particular, plain NVIDIA `sm_XY` values are accepted as is, `compat[sm_XY]` can expand to requested-or-newer SM revisions within the same major compute capability, and `compute_XY` retains its broader compatibility expansion. AMD tokens are kept unchanged by the normalization hook.
 
 ## Technical and administration documentation
 
@@ -200,12 +200,14 @@ The resource types and flags are unchanged. The supplied `.qmgr` file defines:
 
 ### Interaction with other hooks
 
-`hook_normalize_job_gpucap` can consume the capability/architecture mapping from this configuration and the aggregate GPU capability state produced by `hook_aggregate_resources`.
+`hook_normalize_job_gpucap` uses the NVIDIA SM keys from this shared configuration as a source of generated compatibility alternatives and can also consume the aggregate GPU capability state produced by `hook_aggregate_resources`. Plain user-provided `sm_XY` requests are not validated against `vendors.nvidia.architectures`. For `compat[sm_XY]`, the architecture-family values in this mapping are not used: compatibility is based only on the same major compute capability and a requested-or-newer SM revision. `compute_XY` retains the existing ordered-list expansion across all later configured SM values.
 
 `hook_job_gpus` consumes the scheduled `ngpus` allocation at execution time, selects concrete GPU devices, isolates them through the job cgroup, sets vendor-specific GPU environment variables, and publishes GPU usage accounting as implemented by that hook.
 
 ### Administration notes
 
 Administrators should keep architecture and portable-target mappings consistent with the GPU targets actually present in the cluster. The mappings are configuration data rather than hard-coded policy, so new GPU targets can be introduced without changing the discovery code.
+
+The NVIDIA architecture map does not define which plain `sm_XY` values users are allowed to request. It maps discovered NVIDIA capabilities to `gpu_arch` and supplies candidate SM values for normalization expansion. Its key order must remain oldest-to-newest because `compute_XY` compatibility uses that ordering. `compat[sm_XY]` instead selects configured candidates numerically within the same major compute capability, independent of the mapped architecture-family name.
 
 On AMD nodes, `amd-smi` must provide the `TARGET_GRAPHICS_VERSION` field. If AMD GPUs are detected but this field is unavailable, the hook still publishes GPU count/model/memory where available and logs a warning, but cannot populate `gpu_cap` or `gpu_arch` for those devices.
