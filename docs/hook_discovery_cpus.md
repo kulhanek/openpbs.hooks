@@ -170,7 +170,7 @@ The supplied `.qmgr` file defines the following custom resources:
 | `nthreads` | `long` | `hn` | Number of logical CPUs. |
 | `smt` | `boolean` | `h` | Whether simultaneous multithreading is available. |
 | `hybrid_cpu` | `boolean` | `h` | Whether SMT sibling counts differ between cores. |
-| `npus_per_core` | `long` | `he` | Logical processing units per physical core when uniform. |
+| `npus_per_core` | `string` | `h` | Logical processing units per physical core when uniform. |
 
 The hook also updates the standard vnode resources `ncpus`, `mem`, and optionally `vmem`.
 

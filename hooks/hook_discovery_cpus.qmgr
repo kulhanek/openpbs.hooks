@@ -43,8 +43,8 @@ set resource hybrid_cpu type = boolean
 set resource hybrid_cpu flag = h
 
 create resource npus_per_core
-set resource npus_per_core type = long
-set resource npus_per_core flag = he
+set resource npus_per_core type = string
+set resource npus_per_core flag = h
 
 # hook -------------------------------------------
 
