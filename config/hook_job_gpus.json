@@ -1,5 +1,5 @@
 {
-    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-mom.service",
+    "cgroup_root": "/sys/fs/cgroup/system.slice/pbs-jobs.service",
     "jobs_subdir": "pbs_jobs",
     "state_subdir": "gpu_v2",
     "device_isolation": true,
