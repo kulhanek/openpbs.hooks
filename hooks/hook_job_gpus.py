@@ -280,6 +280,50 @@ class NvidiaRuntime(object):
     def available(self):
         return os.path.isfile(self.smi)
 
+    def _device_minor(self, uuid, bus_id):
+        """Return the NVIDIA character-device minor for a physical GPU.
+
+        nvidia-smi's GPU index is an enumeration ordinal and is not guaranteed
+        to be the same as the minor used by /dev/nvidiaN.  The NVIDIA kernel
+        driver publishes the authoritative mapping in
+        /proc/driver/nvidia/gpus/*/information.
+        """
+        wanted_bus = normalize_pci_bus_id(bus_id)
+        for path in glob.glob('/proc/driver/nvidia/gpus/*/information'):
+            values = {}
+            try:
+                with open(path, 'r') as f:
+                    for raw in f:
+                        if ':' not in raw:
+                            continue
+                        key, value = raw.split(':', 1)
+                        values[key.strip().lower()] = value.strip()
+            except OSError:
+                continue
+
+            found_uuid = values.get('gpu uuid')
+            found_bus = values.get('bus location')
+            if found_uuid != uuid:
+                continue
+            if found_bus and normalize_pci_bus_id(found_bus) != wanted_bus:
+                continue
+
+            value = values.get('device minor')
+            if value is None or value == '':
+                raise RuntimeError(
+                    'NVIDIA GPU %s at %s has no Device Minor in %s' %
+                    (uuid, bus_id, path))
+            try:
+                return int(value, 0)
+            except ValueError:
+                raise RuntimeError(
+                    'invalid NVIDIA Device Minor %r for GPU %s in %s' %
+                    (value, uuid, path))
+
+        raise RuntimeError(
+            'cannot map NVIDIA GPU %s at %s to a /dev/nvidiaN minor' %
+            (uuid, bus_id))
+
     def inventory(self):
         if not self.available():
             return []
@@ -299,13 +343,24 @@ class NvidiaRuntime(object):
             uuid = parts[1]
             bus = normalize_pci_bus_id(parts[2])
             memory = int(float(parts[3]) * 1024 * 1024)
-            ndev = dev_info("/dev/nvidia%d" % index)
+            device_minor = self._device_minor(uuid, bus)
+            ndev_path = "/dev/nvidia%d" % device_minor
+            ndev = dev_info(ndev_path)
             if ndev is None:
-                raise RuntimeError("GPU %d has no /dev/nvidia%d device" % (index, index))
+                raise RuntimeError(
+                    "GPU index %d UUID %s at %s maps to missing %s" %
+                    (index, uuid, bus, ndev_path))
+            # Be defensive: the filename and actual character-device minor
+            # should agree.  The BPF rule uses the actual st_rdev values.
+            if ndev["minor"] != device_minor:
+                raise RuntimeError(
+                    "GPU %s maps to %s but its device minor is %d" %
+                    (uuid, ndev_path, ndev["minor"]))
             drm = pci_drm_devices(bus)
             gpus.append({
                 "index": index,
                 "runtime_index": index,
+                "device_minor": device_minor,
                 "uuid": uuid,
                 "pci_bus_id": bus,
                 "numa": pci_numa_node(bus),
