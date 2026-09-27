@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "manage_drm_acl": True,
     "telemetry": True,
     "allocation": "index",          # index | numa
+    "stale_cgroup_grace": 300,       # seconds; protects newly created empty job cgroups
     "vendors": {
         "nvidia": {"smi": "/usr/bin/nvidia-smi"},
         "amd": {"smi": "/usr/bin/amd-smi"},
@@ -845,20 +846,60 @@ class GpuHook(object):
     def cgroup_path(self, jobid):
         return os.path.join(self.jobs_root, str(jobid))
 
-    def _job_cgroup_exists(self, jobid):
-        """Return True while this local job still owns a job cgroup.
+    def _job_cgroup_is_live(self, jobid, state=None):
+        """Return True if a persisted job cgroup still represents a live job.
 
-        The per-job cgroup is created by hook_job_cgroups_v2 before this hook
-        runs at execjob_begin and is the local lifetime authority for a job.
-        GPU state without the corresponding cgroup is stale and must not
-        reserve a physical GPU.
+        Directory existence alone is insufficient: an obsolete job cgroup may
+        remain after all job processes have exited.  On cgroup v2,
+        cgroup.events contains ``populated 1`` while the cgroup or one of its
+        descendants contains processes.  An old cgroup with ``populated 0`` is
+        therefore stale.
+
+        A short grace period protects the normal execjob_begin -> launch
+        interval, when a newly created job cgroup may legitimately be empty.
+        If cgroup.events cannot be read, be conservative and keep the state so
+        that an I/O error cannot cause two jobs to receive the same GPU.
         """
-        return os.path.isdir(self.cgroup_path(jobid))
+        path = self.cgroup_path(jobid)
+        if not os.path.isdir(path):
+            return False
+
+        events_path = os.path.join(path, "cgroup.events")
+        try:
+            events = {}
+            with open(events_path, "r") as f:
+                for raw in f:
+                    fields = raw.split()
+                    if len(fields) == 2:
+                        events[fields[0]] = fields[1]
+            populated = events.get("populated")
+        except Exception as exc:
+            log(pbs.EVENT_DEBUG,
+                "cannot read %s for job %s; treating GPU state as live: %s" %
+                (events_path, jobid, exc))
+            return True
+
+        if populated == "1":
+            return True
+
+        # A new job can have an empty cgroup between execjob_begin and launch.
+        # Preserve such recent state to avoid reassigning its GPU concurrently.
+        created = 0.0
+        if state is not None:
+            try:
+                created = float(state.get("created", 0.0))
+            except Exception:
+                created = 0.0
+        grace = float(self.cfg.get("stale_cgroup_grace", 300))
+        if created > 0.0 and time.time() - created < grace:
+            return True
+
+        return False
 
     def _remove_stale_state(self, jobid, state):
         """Remove one stale GPU state record and best-effort DRM ACLs."""
         log(pbs.EVENT_DEBUG,
-            "removing stale GPU state for job %s: job cgroup no longer exists" %
+            "removing stale GPU state for job %s: job cgroup is absent or unpopulated" %
             jobid)
         try:
             self._remove_drm_acls(state.get("euser", ""), state)
@@ -872,8 +913,9 @@ class GpuHook(object):
         """Return UUIDs reserved by live local jobs and prune stale state.
 
         Caller should hold self.state.lock_file.  A JSON state file is treated
-        as a live allocation only while its corresponding per-job cgroup
-        exists.  This makes allocation robust against missed execjob_end/abort
+        as a live allocation only while its corresponding per-job cgroup is
+        populated (or is a newly created empty cgroup within the configured
+        grace period).  This makes allocation robust against missed execjob_end/abort
         events, Mom restarts, hook updates, and other cases that can leave an
         orphaned state file behind.
         """
@@ -888,7 +930,7 @@ class GpuHook(object):
             if excluded is not None and jobid == excluded:
                 continue
 
-            if not self._job_cgroup_exists(jobid):
+            if not self._job_cgroup_is_live(jobid, state):
                 self._remove_stale_state(jobid, state)
                 continue
 
@@ -1086,11 +1128,7 @@ class GpuHook(object):
         # because it represents the actual local lifetime of the job workload.
         with FileLock(self.state.lock_file):
             for jobid, state in self.state.all().items():
-                if self._job_cgroup_exists(jobid):
-                    continue
-                # Avoid racing the short interval between state creation and
-                # normal job-start bookkeeping.
-                if time.time() - float(state.get("created", 0)) < 30:
+                if self._job_cgroup_is_live(jobid, state):
                     continue
                 self._remove_stale_state(jobid, state)
 
