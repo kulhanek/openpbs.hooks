@@ -280,82 +280,105 @@ class NvidiaRuntime(object):
     def available(self):
         return os.path.isfile(self.smi)
 
-    def _device_minor(self, uuid, bus_id):
-        """Return the NVIDIA character-device minor for a physical GPU.
+    def _proc_inventory(self):
+        """Return authoritative physical NVIDIA inventory from /proc.
 
-        nvidia-smi's GPU index is an enumeration ordinal and is not guaranteed
-        to be the same as the minor used by /dev/nvidiaN.  The NVIDIA kernel
-        driver publishes the authoritative mapping in
-        /proc/driver/nvidia/gpus/*/information.
+        This deliberately does not use NVML/nvidia-smi for enumeration.  A
+        hook process may itself be executing under a cgroup device policy, in
+        which case NVML only reports devices accessible to that process.  The
+        NVIDIA driver's /proc inventory still describes all physical GPUs and
+        provides the UUID <-> PCI BDF <-> character-device-minor mapping.
         """
-        wanted_bus = normalize_pci_bus_id(bus_id)
-        for path in glob.glob('/proc/driver/nvidia/gpus/*/information'):
+        rows = []
+        for path in glob.glob("/proc/driver/nvidia/gpus/*/information"):
             values = {}
             try:
-                with open(path, 'r') as f:
+                with open(path, "r") as f:
                     for raw in f:
-                        if ':' not in raw:
+                        if ":" not in raw:
                             continue
-                        key, value = raw.split(':', 1)
+                        key, value = raw.split(":", 1)
                         values[key.strip().lower()] = value.strip()
-            except OSError:
-                continue
+            except OSError as exc:
+                raise RuntimeError("cannot read NVIDIA GPU information %s: %s" %
+                                   (path, exc))
 
-            found_uuid = values.get('gpu uuid')
-            found_bus = values.get('bus location')
-            if found_uuid != uuid:
-                continue
-            if found_bus and normalize_pci_bus_id(found_bus) != wanted_bus:
-                continue
-
-            value = values.get('device minor')
-            if value is None or value == '':
+            uuid = values.get("gpu uuid")
+            bus = values.get("bus location")
+            minor = values.get("device minor")
+            if not uuid or not bus or minor is None or minor == "":
                 raise RuntimeError(
-                    'NVIDIA GPU %s at %s has no Device Minor in %s' %
-                    (uuid, bus_id, path))
+                    "incomplete NVIDIA GPU information in %s: UUID=%r, bus=%r, minor=%r" %
+                    (path, uuid, bus, minor))
             try:
-                return int(value, 0)
+                minor = int(minor, 0)
             except ValueError:
-                raise RuntimeError(
-                    'invalid NVIDIA Device Minor %r for GPU %s in %s' %
-                    (value, uuid, path))
+                raise RuntimeError("invalid NVIDIA Device Minor %r in %s" %
+                                   (minor, path))
 
-        raise RuntimeError(
-            'cannot map NVIDIA GPU %s at %s to a /dev/nvidiaN minor' %
-            (uuid, bus_id))
+            rows.append({
+                "uuid": uuid,
+                "pci_bus_id": normalize_pci_bus_id(bus),
+                "device_minor": minor,
+            })
+
+        # PCI order gives a deterministic node-local allocation order without
+        # relying on NVML's currently visible device ordinal space.
+        rows.sort(key=lambda row: row["pci_bus_id"])
+        for index, row in enumerate(rows):
+            row["index"] = index
+            row["runtime_index"] = index
+        return rows
+
+    def _smi_metadata(self):
+        """Best-effort metadata for GPUs currently visible to nvidia-smi.
+
+        Missing GPUs are acceptable here: this data must never determine the
+        set of allocatable physical GPUs.
+        """
+        cmd = [self.smi,
+               "--query-gpu=uuid,memory.total",
+               "--format=csv,noheader,nounits"]
+        rc, out, err = run(cmd)
+        if rc != 0:
+            log(pbs.EVENT_DEBUG, "nvidia-smi metadata query failed: %s" % err.strip())
+            return {}
+        result = {}
+        for raw in out.splitlines():
+            parts = [x.strip() for x in raw.split(",")]
+            if len(parts) != 2:
+                continue
+            try:
+                memory = int(float(parts[1]) * 1024 * 1024)
+            except (TypeError, ValueError):
+                memory = 0
+            result[parts[0]] = {"memory": memory}
+        return result
 
     def inventory(self):
         if not self.available():
             return []
-        cmd = [self.smi,
-               "--query-gpu=index,uuid,pci.bus_id,memory.total",
-               "--format=csv,noheader,nounits"]
-        rc, out, err = run(cmd)
-        if rc != 0:
-            raise RuntimeError("nvidia-smi failed: %s" % err.strip())
 
+        rows = self._proc_inventory()
+        metadata = self._smi_metadata()
         gpus = []
-        for raw in out.splitlines():
-            parts = [x.strip() for x in raw.split(",")]
-            if len(parts) != 4:
-                continue
-            index = int(parts[0])
-            uuid = parts[1]
-            bus = normalize_pci_bus_id(parts[2])
-            memory = int(float(parts[3]) * 1024 * 1024)
-            device_minor = self._device_minor(uuid, bus)
+        for row in rows:
+            index = row["index"]
+            uuid = row["uuid"]
+            bus = row["pci_bus_id"]
+            device_minor = row["device_minor"]
+
             ndev_path = "/dev/nvidia%d" % device_minor
             ndev = dev_info(ndev_path)
             if ndev is None:
                 raise RuntimeError(
-                    "GPU index %d UUID %s at %s maps to missing %s" %
-                    (index, uuid, bus, ndev_path))
-            # Be defensive: the filename and actual character-device minor
-            # should agree.  The BPF rule uses the actual st_rdev values.
+                    "NVIDIA GPU %s at %s maps to missing %s" %
+                    (uuid, bus, ndev_path))
             if ndev["minor"] != device_minor:
                 raise RuntimeError(
                     "GPU %s maps to %s but its device minor is %d" %
                     (uuid, ndev_path, ndev["minor"]))
+
             drm = pci_drm_devices(bus)
             gpus.append({
                 "index": index,
@@ -364,11 +387,10 @@ class NvidiaRuntime(object):
                 "uuid": uuid,
                 "pci_bus_id": bus,
                 "numa": pci_numa_node(bus),
-                "memory": memory,
+                "memory": metadata.get(uuid, {}).get("memory", 0),
                 "devices": [ndev] + list(drm),
                 "drm_devices": drm,
             })
-        gpus.sort(key=lambda g: g["index"])
         return gpus
 
     def telemetry(self):
@@ -823,14 +845,58 @@ class GpuHook(object):
     def cgroup_path(self, jobid):
         return os.path.join(self.jobs_root, str(jobid))
 
+    def _job_cgroup_exists(self, jobid):
+        """Return True while this local job still owns a job cgroup.
+
+        The per-job cgroup is created by hook_job_cgroups_v2 before this hook
+        runs at execjob_begin and is the local lifetime authority for a job.
+        GPU state without the corresponding cgroup is stale and must not
+        reserve a physical GPU.
+        """
+        return os.path.isdir(self.cgroup_path(jobid))
+
+    def _remove_stale_state(self, jobid, state):
+        """Remove one stale GPU state record and best-effort DRM ACLs."""
+        log(pbs.EVENT_DEBUG,
+            "removing stale GPU state for job %s: job cgroup no longer exists" %
+            jobid)
+        try:
+            self._remove_drm_acls(state.get("euser", ""), state)
+        except Exception as exc:
+            log(pbs.EVENT_DEBUG,
+                "DRM ACL cleanup failed for stale job %s: %s" %
+                (jobid, exc))
+        self.state.delete(jobid)
+
     def _allocated_uuids(self, exclude_jobid=None):
+        """Return UUIDs reserved by live local jobs and prune stale state.
+
+        Caller should hold self.state.lock_file.  A JSON state file is treated
+        as a live allocation only while its corresponding per-job cgroup
+        exists.  This makes allocation robust against missed execjob_end/abort
+        events, Mom restarts, hook updates, and other cases that can leave an
+        orphaned state file behind.
+        """
         used = set()
+        excluded = str(exclude_jobid) if exclude_jobid is not None else None
+
         for jobid, state in self.state.all().items():
-            if exclude_jobid is not None and str(jobid) == str(exclude_jobid):
+            jobid = str(jobid)
+
+            # The current job has already had its cgroup created, but an old
+            # state file for the same job ID must not make it appear occupied.
+            if excluded is not None and jobid == excluded:
                 continue
+
+            if not self._job_cgroup_exists(jobid):
+                self._remove_stale_state(jobid, state)
+                continue
+
             for gpu in state.get("gpus", []):
-                if gpu.get("uuid"):
-                    used.add(gpu.get("uuid"))
+                uuid = gpu.get("uuid")
+                if uuid:
+                    used.add(uuid)
+
         return used
 
     def _choose(self, gpus, count, used):
@@ -941,6 +1007,9 @@ class GpuHook(object):
 
         with FileLock(self.state.lock_file):
             used = self._allocated_uuids(exclude_jobid=job.id)
+            log(pbs.EVENT_DEBUG,
+                "job %s GPU allocation state: inventory=%s used=%s" %
+                (job.id, [g.get("uuid") for g in all_gpus], sorted(used)))
             selected = self._choose(all_gpus, count, used)
             if self.cfg.get("device_isolation", True):
                 protected = self._protected_devices(all_gpus, selected)
@@ -980,7 +1049,6 @@ class GpuHook(object):
             e.env[name] = value
 
     def periodic(self, e):
-        live = set(str(jobid) for jobid in e.job_list.keys())
         states = self.state.all()
         samples = {}
         if self.cfg.get("telemetry", True):
@@ -1011,13 +1079,20 @@ class GpuHook(object):
                 log(pbs.EVENT_ERROR, "GPU telemetry update failed for %s: %s" %
                     (jobid, exc))
 
-        for jobid, state in states.items():
-            if jobid in live:
-                continue
-            if time.time() - float(state.get("created", 0)) < 30:
-                continue
-            self._remove_drm_acls(state.get("euser", ""), state)
-            self.state.delete(jobid)
+        # Secondary stale-state cleanup.  The allocation path performs the
+        # same reconciliation synchronously before choosing a GPU; periodic
+        # cleanup keeps the state directory tidy even when no new GPU job
+        # arrives.  The cgroup, rather than e.job_list alone, is authoritative
+        # because it represents the actual local lifetime of the job workload.
+        with FileLock(self.state.lock_file):
+            for jobid, state in self.state.all().items():
+                if self._job_cgroup_exists(jobid):
+                    continue
+                # Avoid racing the short interval between state creation and
+                # normal job-start bookkeeping.
+                if time.time() - float(state.get("created", 0)) < 30:
+                    continue
+                self._remove_stale_state(jobid, state)
 
     def epilogue(self, e):
         state = self.state.load(e.job.id)
